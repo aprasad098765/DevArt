@@ -77,14 +77,20 @@ code { font-family: var(--mono); font-size: 12px; background: var(--bg3); paddin
 .canvas-shell { flex: 1; min-width: 0; display: flex; }
 .palette { width: 196px; flex: none; display: flex; flex-direction: column; gap: 10px; padding: 10px; border-right: 1px solid var(--line); background: var(--bg); overflow-y: auto; }
 .palette h2 { font-size: 12px; font-weight: 600; color: var(--muted); margin-top: 4px; }
-.tools { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
-.tools button { padding: 6px 4px; font-size: 12px; } .tools button.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+.tools { display: grid; grid-template-columns: repeat(3, 1fr); gap: 2px; padding: 3px; background: var(--bg2); border: 1px solid var(--line); border-radius: 10px; }
+.tools button { position: relative; flex-direction: column; gap: 3px; padding: 8px 2px 6px; border: 1px solid transparent; border-radius: 7px; background: transparent; color: var(--muted); font-size: 11px; font-weight: 500; line-height: 1; min-width: 0; }
+.tools button:hover:not(.active) { background: var(--bg3); color: var(--fg); }
+.tools button.active { background: var(--bg); border-color: var(--line); color: var(--accent); box-shadow: 0 1px 2px #0000001f; }
+.tools kbd { position: absolute; top: 3px; right: 4px; font: 600 9px/1 var(--mono, monospace); color: var(--muted); opacity: .75; }
+.tools button.active kbd { color: var(--accent); }
 .palette-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
 .palette-grid button { flex-direction: column; gap: 5px; padding: 9px 4px; font-size: 11.5px; white-space: normal; line-height: 1.2; cursor: grab; min-height: 62px; }
 .palette-group { cursor: grab; border-style: dashed; }
 
 .canvas { position: relative; flex: 1; min-width: 0; height: 100%; overflow: hidden; touch-action: none; outline: 0; user-select: none; background: var(--bg); cursor: default; }
 .canvas.connect-mode, .canvas.connect-mode [data-node] { cursor: crosshair; }
+.canvas.move-mode, .canvas.move-mode * { cursor: grab; }
+.canvas.panning, .canvas.panning * { cursor: grabbing !important; }
 .canvas-svg { display: block; background-image: radial-gradient(var(--dot) 1px, transparent 1px); }
 .canvas [data-node] { cursor: move; } .canvas [data-edge] { cursor: pointer; }
 .no-hit { pointer-events: none; }
@@ -111,6 +117,7 @@ code { font-family: var(--mono); font-size: 12px; background: var(--bg3); paddin
 .visual-form input, .visual-form select, .visual-form textarea { padding: 5px 7px; color: var(--fg); width: 100%; resize: vertical; }
 .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .edge-ends { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; font-weight: 600; font-size: 13px; }
+.copy-row { display: flex; gap: 6px; margin: 0 12px 8px; flex: none; } .copy-row select { flex: 1; min-width: 0; } .copy-row button { font-size: 12px; }
 .code-toggle { align-self: flex-start; margin: 8px 12px; font-size: 12px; flex: none; }
 .codebox { flex: 0 0 240px; border-top: 1px solid var(--line); overflow: auto; } .codebox .cm-editor { height: 100%; font-size: 12.5px; background: var(--bg); } .codebox .cm-editor.cm-focused { outline: 0; } .codebox .cm-scroller { font-family: var(--mono); } .codebox .cm-gutters { background: var(--bg2); color: var(--muted); border-right: 1px solid var(--line); } .codebox .cm-content { caret-color: var(--fg); }
 .issues { margin: 0; padding: 8px 12px; list-style: none; font-size: 12px; max-height: 130px; overflow-y: auto; flex: none; border-top: 1px solid var(--line); } .issues li { padding: 2px 0; } .issues .error { color: var(--danger); } .issues .warning { color: var(--warn); }
@@ -121,7 +128,8 @@ code { font-family: var(--mono); font-size: 12px; background: var(--bg3); paddin
   .canvas-shell { flex-direction: column; min-width: 0; }
   .palette { width: 100%; flex-direction: row; align-items: center; border-right: 0; border-bottom: 1px solid var(--line); overflow-x: auto; overflow-y: hidden; flex: none; }
   .palette h2 { display: none; }
-  .tools, .palette-grid { display: flex; flex: none; }
+  .tools { display: flex; flex: none; } .tools button { width: 60px; }
+  .palette-grid { display: flex; flex: none; }
   .palette-grid button { width: 72px; flex: none; }
   .palette-group { flex: none; }
   .canvas { min-height: 0; }

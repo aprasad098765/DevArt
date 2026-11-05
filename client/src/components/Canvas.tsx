@@ -8,7 +8,7 @@ import { applyVisualEdit } from './DiagramPanel.tsx';
 import { toast } from '../api.ts';
 import { Icon } from './ui.tsx';
 
-type Tool = 'select' | 'connect';
+type Tool = 'select' | 'move' | 'connect';
 interface View { x: number; y: number; k: number }
 
 const COMPONENTS: { name: string; icon: string }[] = [
@@ -69,10 +69,14 @@ export function Canvas(p: Props) {
   const viewRef = useRef(view);
   viewRef.current = view;
   const [tool, setTool] = useState<Tool>('select');
+  const [spaceHeld, setSpaceHeld] = useState(false);
+  // Holding Space switches to the Move tool until it is released.
+  const activeTool: Tool = spaceHeld ? 'move' : tool;
   const [selection, setSelection] = useState<Set<string>>(new Set());
   const [editing, setEditing] = useState<string | null>(null);
   const [partBox, setPartBox] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
   const [renaming, setRenaming] = useState(false);
+  const [panning, setPanning] = useState(false);
   const [connecting, setConnecting] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
   const spaceDown = useRef(false);
   const fitted = useRef(false);
@@ -237,7 +241,8 @@ export function Canvas(p: Props) {
 
   const startPan = (e: React.PointerEvent) => {
     const s = { x: e.clientX, y: e.clientY, vx: view.x, vy: view.y };
-    beginDrag(e, (ev) => setView((v) => ({ ...v, x: s.vx + ev.clientX - s.x, y: s.vy + ev.clientY - s.y })));
+    setPanning(true);
+    beginDrag(e, (ev) => setView((v) => ({ ...v, x: s.vx + ev.clientX - s.x, y: s.vy + ev.clientY - s.y })), () => setPanning(false));
   };
 
   const clearSelection = () => { select([]); p.onDiagramSelection(null); };
@@ -248,6 +253,8 @@ export function Canvas(p: Props) {
     host.current?.focus({ preventScroll: true });
     if (e.button === 1 || spaceDown.current) return startPan(e);
     if (e.button !== 0) return;
+    // The move tool only drags the view: it never selects or edits anything.
+    if (activeTool === 'move') return startPan(e);
     const pt = toWorld(e.clientX, e.clientY);
     const target = e.target as Element;
     const id = target.closest('[data-id]')?.getAttribute('data-id') ?? null;
@@ -256,7 +263,7 @@ export function Canvas(p: Props) {
     const edgeId = target.closest('[data-edge]')?.getAttribute('data-edge');
     const visual = el?.type === 'diagram' && VISUAL_TYPES.includes(el.diagramType ?? 'architecture');
 
-    if (tool === 'connect') {
+    if (activeTool === 'connect') {
       if (visual && nodeId) startConnect(e, el!.id, nodeId);
       else startPan(e);
       return;
@@ -432,6 +439,7 @@ export function Canvas(p: Props) {
     setEditing(null);
   };
   const onDoubleClick = (e: React.MouseEvent) => {
+    if (activeTool !== 'select') return;
     const id = (e.target as Element).closest('[data-id]')?.getAttribute('data-id');
     const el = id ? yEls.get(id) : undefined;
     if (!el) return;
@@ -450,7 +458,7 @@ export function Canvas(p: Props) {
   const onKeyDown = (e: React.KeyboardEvent) => {
     if ((e.target as HTMLElement).closest('input, textarea, select, .cm-editor')) return;
     const mod = e.ctrlKey || e.metaKey;
-    if (e.code === 'Space') { spaceDown.current = true; e.preventDefault(); return; }
+    if (e.code === 'Space') return; // handled on window, so it works without canvas focus
     if (mod && e.key === '0') { e.preventDefault(); fit(); return; }
     if (mod && (e.key === '=' || e.key === '+')) { e.preventDefault(); zoomAt(1.2); return; }
     if (mod && e.key === '-') { e.preventDefault(); zoomAt(1 / 1.2); return; }
@@ -461,12 +469,24 @@ export function Canvas(p: Props) {
     if (sel?.kind === 'node' && e.key === 'Enter') { e.preventDefault(); setRenaming(true); return; }
     if (e.key === 'Enter' && selection.size === 1) { const id = [...selection][0]; if (TEXT_TYPES.includes(yEls.get(id)?.type ?? '')) { e.preventDefault(); setEditing(id); } return; }
     if (!mod && e.key.toLowerCase() === 'v') setTool('select');
+    if (!mod && e.key.toLowerCase() === 'm') setTool('move');
     if (!mod && e.key.toLowerCase() === 'c') setTool('connect');
   };
   useEffect(() => {
-    const up = (e: KeyboardEvent) => { if (e.code === 'Space') spaceDown.current = false; };
+    const release = () => { spaceDown.current = false; setSpaceHeld(false); };
+    const up = (e: KeyboardEvent) => { if (e.code === 'Space') release(); };
+    // On window rather than the canvas: right after load nothing has focus yet, and a focused button would otherwise swallow Space.
+    const down = (e: KeyboardEvent) => {
+      if (e.code !== 'Space' || e.ctrlKey || e.metaKey || e.altKey) return;
+      if ((e.target as HTMLElement | null)?.closest?.('input, textarea, select, .cm-editor, [contenteditable="true"]')) return;
+      e.preventDefault();
+      spaceDown.current = true;
+      setSpaceHeld(true);
+    };
+    window.addEventListener('keydown', down);
     window.addEventListener('keyup', up);
-    return () => window.removeEventListener('keyup', up);
+    window.addEventListener('blur', release);
+    return () => { window.removeEventListener('keydown', down); window.removeEventListener('keyup', up); window.removeEventListener('blur', release); };
   }, []);
 
   // ---- parts of a diagram ----
@@ -559,8 +579,17 @@ export function Canvas(p: Props) {
     <div className="canvas-shell">
       <aside className="palette" aria-label="Components">
         <div className="tools" role="toolbar" aria-label="Canvas tools">
-          <button className={tool === 'select' ? 'active' : ''} aria-pressed={tool === 'select'} title="Select and move (V)" onClick={() => setTool('select')}><Icon name="cursor" /> Select</button>
-          <button className={tool === 'connect' ? 'active' : ''} aria-pressed={tool === 'connect'} title="Connect components (C)" onClick={() => setTool('connect')}><Icon name="arrow-right" /> Connect</button>
+          {([
+            ['select', 'Select', 'cursor', 'V', 'Select and edit components'],
+            ['move', 'Move', 'move', 'M', 'Drag to look around the canvas (or hold Space)'],
+            ['connect', 'Connect', 'arrow-right', 'C', 'Drag from one component to another'],
+          ] as const).map(([id, label, icon, key, hint]) => (
+            <button key={id} className={activeTool === id ? 'active' : ''} aria-pressed={activeTool === id} aria-keyshortcuts={key} title={`${hint} (${key})`} onClick={() => setTool(id)}>
+              <kbd>{key}</kbd>
+              <Icon name={icon} size={18} />
+              <span>{label}</span>
+            </button>
+          ))}
         </div>
         <h2>Components</h2>
         <div className="palette-grid">
@@ -575,7 +604,7 @@ export function Canvas(p: Props) {
         </button>
       </aside>
       <div
-        className={`canvas ${tool === 'connect' ? 'connect-mode' : ''}`}
+        className={`canvas ${activeTool === 'connect' ? 'connect-mode' : ''} ${activeTool === 'move' ? 'move-mode' : ''} ${panning ? 'panning' : ''}`}
         ref={host}
         tabIndex={0}
         aria-label="Canvas"
@@ -597,11 +626,11 @@ export function Canvas(p: Props) {
           <g transform={`translate(${view.x} ${view.y}) scale(${view.k})`}>
             {sorted.map((e) => <g key={e.id} data-id={e.id} dangerouslySetInnerHTML={{ __html: htmlFor(e) }} />)}
             {selBox && <rect className="no-hit" x={selBox.x} y={selBox.y} width={selBox.w} height={selBox.h} fill="none" stroke="var(--accent)" strokeWidth={1.4 / view.k} strokeDasharray={framed.length > 1 ? `${5 / view.k} ${4 / view.k}` : undefined} />}
-            {selBox && single?.type !== 'arrow' && !framed.some((e) => e.locked) && !sel && HANDLES.map((h) => {
+            {selBox && single?.type !== 'arrow' && !framed.some((e) => e.locked) && !sel && activeTool === 'select' && HANDLES.map((h) => {
               const q = pos(h, selBox);
               return <rect key={h} data-handle={h} x={q.x - handleSize / 2} y={q.y - handleSize / 2} width={handleSize} height={handleSize} rx={2 / view.k} fill="var(--bg)" stroke="var(--accent)" strokeWidth={1.3 / view.k} style={{ cursor: `${h}-resize` }} onPointerDown={(e) => startResize(e, h)} />;
             })}
-            {single?.type === 'arrow' && (() => {
+            {single?.type === 'arrow' && activeTool === 'select' && (() => {
               const pts = resolveArrowPoints(single, byId);
               return (['start', 'end'] as const).map((end) => {
                 const q = end === 'start' ? pts[0] : pts.at(-1)!;
@@ -613,8 +642,8 @@ export function Canvas(p: Props) {
 
         {partBox && (
           <div className="part-outline" style={partBox}>
-            {sel?.kind === 'node' && !renaming && tool === 'select' && <div className="part-connect" role="button" aria-label="Drag to connect to another component" title="Drag to another component to connect" onPointerDown={(e) => { if (sel) startConnect(e, sel.diagramId, sel.id); }} />}
-            {partNode && !partNode.isGroup && !renaming && tool === 'select' && DRAGGABLE_TYPES.includes(partType) && <div className="part-resize" role="button" aria-label="Drag to resize this component" title="Drag to resize" onPointerDown={startNodeResize} />}
+            {sel?.kind === 'node' && !renaming && activeTool === 'select' && <div className="part-connect" role="button" aria-label="Drag to connect to another component" title="Drag to another component to connect" onPointerDown={(e) => { if (sel) startConnect(e, sel.diagramId, sel.id); }} />}
+            {partNode && !partNode.isGroup && !renaming && activeTool === 'select' && DRAGGABLE_TYPES.includes(partType) && <div className="part-resize" role="button" aria-label="Drag to resize this component" title="Drag to resize" onPointerDown={startNodeResize} />}
           </div>
         )}
         {connecting && (
@@ -670,7 +699,7 @@ export function Canvas(p: Props) {
           <button aria-label="Fit to content" title="Fit (Ctrl+0)" onClick={fit}><Icon name="fit" /></button>
         </div>
 
-        {tool === 'connect' && <div className="mode-hint" role="status">Drag from one component to another. Press <kbd>Esc</kbd> when you're done.</div>}
+        {activeTool === 'connect' && <div className="mode-hint" role="status">Drag from one component to another. Press <kbd>Esc</kbd> when you're done.</div>}
         {empty && (
           <div className="canvas-empty">
             <b>Drag a component here to start</b>

@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import * as Y from 'yjs';
 import { diagramSize, renderDiagram } from '../../../shared/render.ts';
 import { parseDiagram } from '../../../shared/dsl.ts';
+import { toMermaid } from '../../../shared/mermaid.ts';
 import { addEdge, moveNode, relayout, removeEdge, removeNode, reverseEdge, setNodeProps, updateEdge, VISUAL_TYPES } from '../../../shared/dslEdit.ts';
 import { ICON_NAMES } from '../../../shared/icons.ts';
 import type { CanvasElement, DiagramSelection, DiagramType } from '../../../shared/types.ts';
@@ -47,6 +48,19 @@ export function DiagramPanel({ doc, element: el, canDelete, selection, onSelecti
   const editable = visual && !hasErrors;
   const codeOpen = showCode || !editable;
 
+  const [copied, setCopied] = useState(false);
+  const [format, setFormat] = useState<'devart' | 'mermaid' | 'markdown'>('devart');
+  const copyCode = async () => {
+    try {
+      const mermaid = () => toMermaid(type, code);
+      const text = format === 'mermaid' ? mermaid() : format === 'markdown' ? `\`\`\`mermaid\n${mermaid()}\n\`\`\`` : code;
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      toast("Couldn't copy the code.", true);
+    }
+  };
   const edit = (next: string) => applyVisualEdit(doc, el.id, next);
   const sel = selection?.diagramId === el.id ? selection : null;
   const node = sel?.kind === 'node' ? d.nodes.find((n) => n.id === sel.id) : undefined;
@@ -151,6 +165,14 @@ export function DiagramPanel({ doc, element: el, canDelete, selection, onSelecti
 
       <div className="dpanel-grow" />
       {editable && <button className="link code-toggle" aria-expanded={showCode} onClick={() => setShowCode(!showCode)}><Icon name="code" size={14} /> {showCode ? 'Hide code' : 'Edit as code'}</button>}
+      <div className="copy-row">
+        <select aria-label="Copy format" value={format} onChange={(e) => setFormat(e.target.value as typeof format)}>
+          <option value="devart">DevArt code</option>
+          <option value="mermaid">Mermaid</option>
+          <option value="markdown">Markdown (Mermaid block)</option>
+        </select>
+        <button onClick={copyCode} disabled={!code || hasErrors && format !== 'devart'}><Icon name={copied ? 'check' : 'copy'} size={14} /> {copied ? 'Copied' : 'Copy'}</button>
+      </div>
       {codeOpen && <CodeBox value={code} onChange={(next) => applyDiagramChange(doc, el.id, { code: next })} ariaLabel="Diagram code" />}
       {issues.length > 0 && (
         <ul className="issues" aria-live="polite">
