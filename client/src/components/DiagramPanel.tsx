@@ -1,15 +1,29 @@
 import { useMemo, useState } from 'react';
 import * as Y from 'yjs';
-import { diagramSize, renderDiagram } from '../../../shared/render.ts';
-import { parseDiagram } from '../../../shared/dsl.ts';
+import { diagramSize, opacityOf, renderDiagram } from '../../../shared/render.ts';
+import { parseDiagram, type GraphNode, type ParsedDiagram } from '../../../shared/dsl.ts';
 import { toMermaid } from '../../../shared/mermaid.ts';
-import { addEdge, moveNode, relayout, removeEdge, removeNode, reverseEdge, setNodeProps, updateEdge, VISUAL_TYPES } from '../../../shared/dslEdit.ts';
+import { addEdge, DRAGGABLE_TYPES, moveNode, relayout, removeEdge, removeNode, reverseEdge, setNodeProps, updateEdge, VISUAL_TYPES, type PropValue } from '../../../shared/dslEdit.ts';
 import { ICON_NAMES } from '../../../shared/icons.ts';
+import { BORDER_STYLES, BORDER_WIDTHS, NODE_SHAPES, NODE_STYLE_PROPS, TEXT_ALIGNS, TEXT_VALIGNS } from '../../../shared/types.ts';
 import type { CanvasElement, DiagramSelection, DiagramType } from '../../../shared/types.ts';
 import { toast } from '../api.ts';
 import { CodeBox, Icon } from './ui.tsx';
+import { ColorField, Field, NumberField, OpacitySlider, Section, Segmented, Toggle, undoStep, type SegOption } from './controls.tsx';
 
 const COLORS = ['blue', 'green', 'red', 'orange', 'purple', 'yellow', 'pink', 'teal', 'gray'];
+
+const cap = (s: string) => s[0].toUpperCase() + s.slice(1);
+/** `oval` and `ellipse` draw the same shape, so the picker shows one swatch for both. */
+const SHAPE_CHOICES = NODE_SHAPES.filter((s) => s !== 'ellipse');
+export const BORDER_OPTIONS: SegOption<keyof typeof BORDER_WIDTHS>[] = (Object.keys(BORDER_WIDTHS) as (keyof typeof BORDER_WIDTHS)[]).map((k) => ({ value: k, label: cap(k) }));
+const BORDER_STYLE_OPTIONS: SegOption<(typeof BORDER_STYLES)[number]>[] = BORDER_STYLES.map((s) => ({ value: s, label: cap(s) }));
+export const ALIGN_OPTIONS: SegOption<(typeof TEXT_ALIGNS)[number]>[] = TEXT_ALIGNS.map((a) => ({ value: a, label: `Align ${a}`, icon: `align-${a}` }));
+const VALIGN_OPTIONS: SegOption<(typeof TEXT_VALIGNS)[number]>[] = TEXT_VALIGNS.map((a) => ({ value: a, label: `Align ${a}`, icon: `valign-${a}` }));
+const truthy = (v: string | undefined) => !!v && !/^(false|no|0|off)$/i.test(v);
+const num = (v: string | undefined) => { const x = v === undefined || v.trim() === '' ? NaN : Number(v); return Number.isFinite(x) ? x : undefined; };
+/** The border preset a node uses, or undefined for the default or a pixel width. */
+export const borderPreset = (v: string | undefined) => (v && Object.hasOwn(BORDER_WIDTHS, v) ? v as keyof typeof BORDER_WIDTHS : undefined);
 
 /** Saves a diagram change and refits its box, keeping any scale the user dragged to. */
 export function applyDiagramChange(doc: Y.Doc, id: string, patch: Partial<CanvasElement>) {
@@ -93,49 +107,7 @@ export function DiagramPanel({ doc, element: el, canDelete, selection, onSelecti
           )}
 
           {node && (
-            <div className="visual-form" key={node.id}>
-              <label>Name<input aria-label="Component name" value={node.props.label ?? node.id} onChange={(e) => edit(setNodeProps(type, code, node.id, { label: e.target.value === node.id ? undefined : e.target.value }))} /></label>
-              {!node.isGroup && <label>Description<textarea rows={2} aria-label="Component description" value={node.props.description ?? ''} onChange={(e) => edit(setNodeProps(type, code, node.id, { description: e.target.value || undefined }))} /></label>}
-              <div className="row2">
-                <label>Icon
-                  <select aria-label="Component icon" value={node.props.icon ?? ''} onChange={(e) => edit(setNodeProps(type, code, node.id, { icon: e.target.value || undefined }))}>
-                    <option value="">None</option>
-                    {node.props.icon && !ICON_NAMES.includes(node.props.icon) && <option value={node.props.icon}>{node.props.icon}</option>}
-                    {ICON_NAMES.map((i) => <option key={i} value={i}>{i}</option>)}
-                  </select>
-                </label>
-                <label>Colour
-                  <select aria-label="Component colour" value={node.props.color ?? ''} onChange={(e) => edit(setNodeProps(type, code, node.id, { color: e.target.value || undefined }))}>
-                    <option value="">Default</option>
-                    {node.props.color && !COLORS.includes(node.props.color) && <option value={node.props.color}>{node.props.color}</option>}
-                    {COLORS.map((c) => <option key={c} value={c}>{c}</option>)}
-                  </select>
-                </label>
-              </div>
-              {!node.isGroup && d.nodes.some((n) => n.isGroup) && (
-                <label>Group
-                  <select aria-label="Component group" value={node.parent ?? ''} onChange={(e) => {
-                    const next = moveNode(type, code, node.id, e.target.value || undefined);
-                    if (next === null) toast("Couldn't move this component to that group.", true);
-                    else edit(next);
-                  }}>
-                    <option value="">None</option>
-                    {d.nodes.filter((n) => n.isGroup).map((g) => <option key={g.id} value={g.id}>{g.props.label ?? g.id}</option>)}
-                  </select>
-                </label>
-              )}
-              <label>Connect to
-                <select aria-label="Connect to" value="" onChange={(e) => { if (e.target.value) edit(addEdge(code, node.id, e.target.value)); }}>
-                  <option value="">Choose…</option>
-                  {d.nodes.filter((n) => n.id !== node.id).map((n) => <option key={n.id} value={n.id}>{n.props.label ?? n.id}</option>)}
-                </select>
-              </label>
-              <button className="danger" onClick={() => {
-                const next = relayout(el, removeNode(type, code, node.id));
-                doc.getMap<CanvasElement>('elements').set(el.id, { ...el, ...next });
-                onSelection(null);
-              }}><Icon name="trash" size={14} /> Delete {node.isGroup ? 'group and contents' : 'component'}</button>
-            </div>
+            <NodeForm key={node.id} doc={doc} el={el} type={type} code={code} d={d} node={node} edit={edit} onSelection={onSelection} />
           )}
 
           {edge && (
@@ -182,3 +154,152 @@ export function DiagramPanel({ doc, element: el, canDelete, selection, onSelecti
     </aside>
   );
 }
+
+interface NodeFormProps {
+  doc: Y.Doc;
+  el: CanvasElement;
+  type: DiagramType;
+  code: string;
+  d: ParsedDiagram;
+  node: GraphNode;
+  edit: (next: string) => void;
+  onSelection: (s: DiagramSelection | null) => void;
+}
+
+/** Content, style, text, layout and connections of one selected component or group. */
+function NodeForm({ doc, el, type, code, d, node, edit, onSelection }: NodeFormProps) {
+  const p = node.props;
+  const set = (patch: Record<string, PropValue>) => edit(setNodeProps(type, code, node.id, patch));
+  /** A style change, saved as one undo step of its own. */
+  const style = (patch: Record<string, PropValue>) => undoStep(doc, () => set(patch));
+  const styled = NODE_STYLE_PROPS.some((k) => p[k] !== undefined);
+  const groups = d.nodes.filter((n) => n.isGroup);
+  const sizable = !node.isGroup && DRAGGABLE_TYPES.includes(type);
+  const borderPx = p.border !== undefined && !borderPreset(p.border) ? num(p.border) : undefined;
+
+  return (
+    <div className="visual-form pform">
+      <Section title="Content">
+        <label>Name<input aria-label="Component name" value={p.label ?? node.id} onChange={(e) => set({ label: e.target.value === node.id ? undefined : e.target.value })} /></label>
+        {!node.isGroup && <label>Description<textarea rows={2} aria-label="Component description" value={p.description ?? ''} onChange={(e) => set({ description: e.target.value || undefined })} /></label>}
+        <div className="row2">
+          <label>Icon
+            <select aria-label="Component icon" value={p.icon ?? ''} onChange={(e) => style({ icon: e.target.value || undefined })}>
+              <option value="">None</option>
+              {p.icon && !ICON_NAMES.includes(p.icon) && <option value={p.icon}>{p.icon}</option>}
+              {ICON_NAMES.map((i) => <option key={i} value={i}>{i}</option>)}
+            </select>
+          </label>
+          <label>Colour
+            <select aria-label="Component colour" value={p.color ?? ''} onChange={(e) => style({ color: e.target.value || undefined })}>
+              <option value="">Default</option>
+              {p.color && !COLORS.includes(p.color) && <option value={p.color}>{p.color}</option>}
+              {COLORS.map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </label>
+        </div>
+      </Section>
+
+      <Section title="Style" actions={
+        <button type="button" className="psec-action" disabled={!styled} title="Remove every style setting from this component" onClick={() => style(Object.fromEntries(NODE_STYLE_PROPS.map((k) => [k, undefined])))}>
+          <Icon name="reset" size={12} /> Reset style
+        </button>
+      }>
+        {!node.isGroup && (
+          <Field label="Shape">
+            <div className="shape-grid" role="radiogroup" aria-label="Shape">
+              {SHAPE_CHOICES.map((s) => {
+                const on = p.shape === s || (s === 'oval' && p.shape === 'ellipse');
+                return (
+                  <button key={s} type="button" role="radio" aria-checked={on} className={on ? 'on' : ''} title={on ? `${cap(s)} (click again for the default)` : cap(s)} aria-label={cap(s)}
+                    onClick={() => style({ shape: on ? undefined : s })}>
+                    <Icon name={`shape-${s}`} size={18} />
+                  </button>
+                );
+              })}
+            </div>
+          </Field>
+        )}
+        <Field label="Fill"><ColorField ariaLabel="Fill colour" allowNone value={p.fill} onChange={(v) => style({ fill: v })} /></Field>
+        <Field label="Opacity"><OpacitySlider value={opacityOf(p.opacity)} onChange={(v) => style({ opacity: v })} /></Field>
+        <Field label={borderPx === undefined ? 'Border' : `Border (${borderPx}px)`}>
+          <Segmented ariaLabel="Border width" options={BORDER_OPTIONS} value={borderPreset(p.border)} clearable onChange={(v) => style({ border: v })} />
+        </Field>
+        <Field label="Border style">
+          <Segmented ariaLabel="Border style" options={BORDER_STYLE_OPTIONS} value={(BORDER_STYLES as readonly string[]).includes(p.borderStyle ?? '') ? p.borderStyle as (typeof BORDER_STYLES)[number] : 'solid'}
+            onChange={(v) => style({ borderStyle: v === 'solid' ? undefined : v })} />
+        </Field>
+        <Field label="Border colour"><ColorField ariaLabel="Border colour" value={p.borderColor} onChange={(v) => style({ borderColor: v })} /></Field>
+        <Field label="Corner radius"><NumberField ariaLabel="Corner radius" min={0} max={320} placeholder={0} value={num(p.radius)} onChange={(v) => style({ radius: v })} /></Field>
+      </Section>
+
+      <Section title="Text">
+        <Field label="Text colour"><ColorField ariaLabel="Text colour" value={p.textColor} onChange={(v) => style({ textColor: v })} /></Field>
+        <div className="pfield-row">
+          <Field label="Size"><NumberField ariaLabel="Font size" min={6} max={72} placeholder={node.isGroup ? 12 : 13} value={num(p.fontSize)} onChange={(v) => style({ fontSize: v })} /></Field>
+          <Field label="Style">
+            <div className="ptoggles">
+              <Toggle label="Bold" icon="bold" on={truthy(p.bold)} onChange={(on) => style({ bold: on })} />
+              <Toggle label="Italic" icon="italic" on={truthy(p.italic)} onChange={(on) => style({ italic: on })} />
+            </div>
+          </Field>
+        </div>
+        {!node.isGroup && (
+          <div className="pfield-row">
+            <Field label="Horizontal">
+              <Segmented ariaLabel="Horizontal text alignment" iconOnly options={ALIGN_OPTIONS} value={(TEXT_ALIGNS as readonly string[]).includes(p.align ?? '') ? p.align as (typeof TEXT_ALIGNS)[number] : 'center'}
+                onChange={(v) => style({ align: v === 'center' ? undefined : v })} />
+            </Field>
+            <Field label="Vertical">
+              <Segmented ariaLabel="Vertical text alignment" iconOnly options={VALIGN_OPTIONS} value={(TEXT_VALIGNS as readonly string[]).includes(p.valign ?? '') ? p.valign as (typeof TEXT_VALIGNS)[number] : 'middle'}
+                onChange={(v) => style({ valign: v === 'middle' ? undefined : v })} />
+            </Field>
+          </div>
+        )}
+      </Section>
+
+      {(sizable || (!node.isGroup && groups.length > 0)) && (
+        <Section title="Layout">
+          {!node.isGroup && groups.length > 0 && (
+            <label>Group
+              <select aria-label="Component group" value={node.parent ?? ''} onChange={(e) => {
+                const next = moveNode(type, code, node.id, e.target.value || undefined);
+                if (next === null) toast("Couldn't move this component to that group.", true);
+                else undoStep(doc, () => edit(next));
+              }}>
+                <option value="">None</option>
+                {groups.map((g) => <option key={g.id} value={g.id}>{g.props.label ?? g.id}</option>)}
+              </select>
+            </label>
+          )}
+          {sizable && (
+            <div className="pfield-row">
+              <Field label="Width"><NumberField ariaLabel="Width" stepper={false} min={48} max={640} step={4} placeholder={undefined} value={num(p.w)} onChange={(v) => style({ w: v })} /></Field>
+              <Field label="Height"><NumberField ariaLabel="Height" stepper={false} min={48} max={640} step={4} placeholder={undefined} value={num(p.h)} onChange={(v) => style({ h: v })} /></Field>
+            </div>
+          )}
+          {sizable && (p.w !== undefined || p.h !== undefined) && (
+            <button type="button" className="psec-action" onClick={() => style({ w: undefined, h: undefined })}><Icon name="fit" size={12} /> Automatic size</button>
+          )}
+        </Section>
+      )}
+
+      <Section title="Connections">
+        <label>Connect to
+          <select aria-label="Connect to" value="" onChange={(e) => { const to = e.target.value; if (to) undoStep(doc, () => edit(addEdge(code, node.id, to))); }}>
+            <option value="">Choose…</option>
+            {d.nodes.filter((n) => n.id !== node.id).map((n) => <option key={n.id} value={n.id}>{n.props.label ?? n.id}</option>)}
+          </select>
+        </label>
+        <button className="danger" onClick={() => {
+          undoStep(doc, () => {
+            const next = relayout(el, removeNode(type, code, node.id));
+            doc.getMap<CanvasElement>('elements').set(el.id, { ...el, ...next });
+          });
+          onSelection(null);
+        }}><Icon name="trash" size={14} /> Delete {node.isGroup ? 'group and contents' : 'component'}</button>
+      </Section>
+    </div>
+  );
+}
+

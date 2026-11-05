@@ -57,7 +57,7 @@ test('no sign-in: the first request has a user, and removed features are gone', 
   const me = await get('/me');
   assert.equal(me.status, 200);
   assert.equal(me.body.name, 'You');
-  for (const route of ['/teams', '/templates', '/presets', '/tokens', '/ai/status']) assert.equal((await get(route)).status, 404, route);
+  for (const route of ['/teams', '/presets', '/tokens', '/ai/status']) assert.equal((await get(route)).status, 404, route);
   for (const route of ['/import', '/ai/draw']) assert.equal((await post(route, {})).status, 404, route);
   const f = (await post('/files', { title: 'Gone' })).body;
   for (const route of ['comments', 'versions', 'embed-tokens']) assert.equal((await get(`/files/${f.id}/${route}`)).status, 404, route);
@@ -99,6 +99,34 @@ test('diagrams: create, validate issues, update, export to each format', async (
   }
   const svg = await get(`/files/${f.id}/export?format=svg`);
   assert.match(Buffer.from(svg.body as ArrayBuffer).toString(), /^<svg /);
+});
+
+test('export options: scale, transparent background, and Mermaid', async () => {
+  const f = (await post('/files', { title: 'Options' })).body;
+  const d = (await post(`/files/${f.id}/diagrams`, { type: 'architecture', code: 'A > B: call', title: 'One' })).body;
+  const pngWidth = (b: ArrayBuffer) => Buffer.from(b).readUInt32BE(16);
+  const one = await get(`/files/${f.id}/export?format=png&elementId=${d.id}&scale=1`);
+  const three = await get(`/files/${f.id}/export?format=png&elementId=${d.id}&scale=3`);
+  assert.ok(Math.abs(pngWidth(three.body as ArrayBuffer) - pngWidth(one.body as ArrayBuffer) * 3) <= 3);
+  const text = async (p: string) => Buffer.from((await get(p)).body as ArrayBuffer).toString();
+  assert.match(await text(`/files/${f.id}/export?format=svg`), /<rect [^>]*fill=/);
+  assert.doesNotMatch(await text(`/files/${f.id}/export?format=svg&transparent=1`), /^<svg[^>]*>\s*<rect x=/);
+  const pdf = await get(`/files/${f.id}/export?format=pdf&scale=3&transparent=1`);
+  assert.equal(Buffer.from(pdf.body as ArrayBuffer).subarray(0, 4).toString(), '%PDF');
+  const rendered = await post('/render', { type: 'architecture', code: 'A > B', format: 'svg', transparent: true });
+  assert.equal(rendered.status, 200);
+  const mmd = await text(`/files/${f.id}/export?format=mermaid&elementId=${d.id}`);
+  assert.match(mmd, /^flowchart LR\n/);
+  assert.match(mmd, /-->\|"call"\|/);
+});
+
+test('templates are listed and fetched by id', async () => {
+  const list = (await get('/templates')).body;
+  assert.equal(list.length, 6);
+  const one = await get(`/templates/${list[0].id}`);
+  assert.equal(one.status, 200);
+  assert.equal(one.body.code, list[0].code);
+  assert.equal((await get('/templates/nope')).status, 404);
 });
 
 test('files can be renamed, searched, deleted, and restored', async () => {
@@ -182,7 +210,7 @@ test('a browser\'s saved copy does not duplicate content after the server restar
 
 async function exerciseMcp(client: Client) {
   const tools = (await client.listTools()).tools.map((t) => t.name).sort();
-  assert.deepEqual(tools, ['draw_architecture', 'export_file', 'get_diagram_syntax', 'list_diagrams', 'list_files', 'render_diagram', 'update_diagram', 'validate_diagram']);
+  assert.deepEqual(tools, ['draw_architecture', 'draw_from_template', 'export_file', 'export_mermaid', 'get_diagram_syntax', 'import_mermaid', 'list_diagrams', 'list_files', 'list_templates', 'render_diagram', 'update_diagram', 'validate_diagram']);
   const json = (r: any) => JSON.parse(r.content[0].text);
   const call = (name: string, args: Record<string, unknown>) => client.callTool({ name, arguments: args });
 
@@ -202,6 +230,25 @@ async function exerciseMcp(client: Client) {
   assert.ok(json(await call('list_files', { query: 'From MCP' })).some((f: any) => f.id === info.fileId));
   const missing: any = await call('list_diagrams', { fileId: 'does-not-exist' });
   assert.equal(missing.isError, true);
+
+  const mermaid = (await call('export_mermaid', { fileId: info.fileId, diagramId: info.diagramId }) as any).content[0].text;
+  assert.match(mermaid, /^flowchart LR/);
+  const imported: any = await call('import_mermaid', { mermaid: 'sequenceDiagram\n  Alice->>Bob: hi\n  Bob-->>Alice: hello', title: 'Imported' });
+  const importedInfo = json(imported);
+  assert.equal(importedInfo.saved, true);
+  assert.equal(importedInfo.type, 'sequence');
+  assert.equal(imported.content[1].type, 'image');
+  assert.equal(json(await call('list_diagrams', { fileId: importedInfo.fileId }))[0].code, 'Alice\nBob\n\nAlice > Bob: hi\nBob --> Alice: hello');
+  const graph = json(await call('import_mermaid', { mermaid: 'graph TD\n  A[Web] --> B[(DB)]' }));
+  assert.equal(graph.type, 'architecture');
+  assert.equal((await call('import_mermaid', { mermaid: 'pie\n "a": 1' }) as any).isError, true);
+
+  const templates = json(await call('list_templates', {}));
+  assert.equal(templates.length, 6);
+  const fromTemplate: any = await call('draw_from_template', { templateId: 'oauth-flow' });
+  assert.equal(json(fromTemplate).saved, true);
+  assert.equal(json(fromTemplate).type, 'sequence');
+  assert.equal((await call('draw_from_template', { templateId: 'nope' }) as any).isError, true);
 }
 
 test('MCP over HTTP', async () => {

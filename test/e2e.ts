@@ -26,6 +26,13 @@ async function open(width = 1440, height = 900) {
   return page;
 }
 const shot = (p: Page, name: string) => p.screenshot({ path: path.join(out, `${name}.png`) });
+/** Opens the Insert menu if needed, searches for an item, and returns its draggable button. Dragging it out closes the menu again. */
+async function item(p: Page, name: string) {
+  if (!(await p.locator('.insert-pop').count())) await p.locator('.insert-toggle').click();
+  await p.locator('.insert-pop').getByRole('searchbox').fill(name);
+  return p.locator('.insert-pop').getByRole('button', { name, exact: true });
+}
+
 async function step(name: string, fn: () => Promise<void>) {
   try { await fn(); results.push(`PASS ${name}`); console.log(`PASS ${name}`); }
   catch (e) { await shot(a, `fail-${results.length}`).catch(() => {}); results.push(`FAIL ${name}: ${(e as Error).message.split('\n')[0]}`); console.log(`FAIL ${name}: ${(e as Error).message}`); }
@@ -71,18 +78,18 @@ try {
     await a.waitForSelector('.canvas-empty');
     await shot(a, 'manual-empty');
     const canvas = (await a.locator('.canvas').boundingBox())!;
-    await a.locator('.palette').getByRole('button', { name: 'Service' }).dragTo(a.locator('.canvas'), { targetPosition: { x: 300, y: 250 } });
+    await (await item(a, 'Service')).dragTo(a.locator('.canvas'), { targetPosition: { x: 300, y: 250 } });
     await part(a, 'Service').waitFor();
     const placed = await boxOf(a, 'Service');
     near(placed.x + 48, canvas.x + 300, 14);
     near(placed.y + 38, canvas.y + 250, 14);
     assert.equal(await a.locator('.canvas-empty').count(), 0);
-    await a.locator('.palette').getByRole('button', { name: 'Database' }).dragTo(a.locator('.canvas'), { targetPosition: { x: 650, y: 250 } });
+    await (await item(a, 'Database')).dragTo(a.locator('.canvas'), { targetPosition: { x: 650, y: 250 } });
     await part(a, 'Database').waitFor();
     const after = await boxOf(a, 'Service');
     near(after.x, placed.x);
     near(after.y, placed.y);
-    await a.locator('.palette').getByRole('button', { name: 'Cache' }).click();
+    await (await item(a, 'Cache')).dragTo(a.locator('.canvas'), { targetPosition: { x: 420, y: 420 } });
     await part(a, 'Cache').waitFor();
     const d = await until(a, (e) => /Service \[icon: server\]/.test(e.code) && /Database \[icon: database\]/.test(e.code) && /Cache/.test(e.code), 'components');
     assert.equal(d.diagramType, 'architecture', 'manual drawings are the same kind of diagram as AI ones');
@@ -158,10 +165,10 @@ try {
   });
 
   await step('organize components into a group by dragging, and back out', async () => {
-    await a.locator('.palette').getByRole('button', { name: 'Group', exact: true }).dragTo(a.locator('.canvas'), { targetPosition: { x: 200, y: 500 } });
+    await (await item(a, 'Group')).dragTo(a.locator('.canvas'), { targetPosition: { x: 200, y: 500 } });
     await part(a, 'Group').waitFor();
     const group = middle(await boxOf(a, 'Group'));
-    const lb = a.locator('.palette').getByRole('button', { name: 'Queue' });
+    const lb = await item(a, 'Queue');
     await lb.dragTo(a.locator('.canvas'), { targetPosition: { x: group.x - (await a.locator('.canvas').boundingBox())!.x, y: group.y - (await a.locator('.canvas').boundingBox())!.y } });
     await part(a, 'Queue').waitFor();
     await until(a, (e) => /Group \{[^}]*Queue/.test(e.code), 'dropped into the group');
@@ -232,7 +239,7 @@ try {
   });
 
   await step('the editor has no leftover features', async () => {
-    for (const gone of ['Share', 'Comments', 'Version history', 'Present', 'Rectangle', 'Draw', 'Eraser', 'Insert', 'Snap to grid']) {
+    for (const gone of ['Share', 'Comments', 'Version history', 'Present', 'Draw', 'Eraser', 'Snap to grid']) {
       assert.equal(await a.getByRole('button', { name: gone, exact: true }).count(), 0, gone);
     }
     assert.equal(await a.getByRole('tab').count(), 0);
@@ -268,7 +275,7 @@ try {
     const llm = await boxOf(a, 'LLM');
     near(llm.x, before.llm.x, 3);
     near(llm.y, before.llm.y, 3);
-    await a.locator('.palette').getByRole('button', { name: 'Cache' }).click();
+    await (await item(a, 'Cache')).dragTo(a.locator('.canvas'), { targetPosition: { x: 420, y: 420 } });
     await until(a, (e) => /Cache/.test(e.code), 'new component on an MCP diagram');
     await part(a, 'Cache').waitFor();
     const canvasBox = (await a.locator('.canvas').boundingBox())!;
@@ -381,7 +388,7 @@ try {
     await c.waitForSelector('.canvas');
     await c.waitForSelector('.save-state:has-text("Offline"), .save-state:has-text("Connecting")');
     await c.waitForSelector('.pwa-status:has-text("saved copy")');
-    await c.locator('.palette').getByRole('button', { name: 'Service' }).click();
+    await (await item(c, 'Service')).dragTo(c.locator('.canvas'), { targetPosition: { x: 420, y: 420 } });
     await part(c, 'Service').waitFor();
     await c.waitForTimeout(500);
     await shot(c, 'offline');
@@ -410,12 +417,14 @@ try {
     await noOverflow();
     await m.getByRole('button', { name: /Draw Manually/ }).click();
     await m.waitForURL(/\/f\//);
-    await m.locator('.palette').getByRole('button', { name: 'Service' }).click();
+    assert.equal(await m.locator('.insert-pop').count(), 0, 'the insert menu starts closed');
+    await (await item(m, 'Service')).dragTo(m.locator('.canvas'), { targetPosition: { x: 150, y: 450 } });
     await part(m, 'Service').waitFor();
     await m.waitForTimeout(200);
     await shot(m, 'mobile-editor');
     await noOverflow();
-    await m.locator('.palette').getByRole('button', { name: 'Database' }).click({ timeout: 3000 });
+    await m.locator('.canvas').click({ position: { x: 300, y: 250 } }); // deselect so the properties sheet does not cover the drop spot
+    await (await item(m, 'Database')).dragTo(m.locator('.canvas'), { targetPosition: { x: 300, y: 550 } });
     await part(m, 'Database').waitFor();
     await m.waitForTimeout(200);
     await shot(m, 'mobile-editor-2');

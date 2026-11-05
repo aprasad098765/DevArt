@@ -3,6 +3,8 @@
 import dagre from '@dagrejs/dagre';
 import { iconPath } from './icons.ts';
 import { parseDiagram, type GraphEdge, type ParsedDiagram, type Props, type SeqItem } from './dsl.ts';
+import { placeLabels, routeEdges, routeEnds, routePath, translateRoute, trimRoute, type Direction, type Outline, type Route, type RouteNode, type Routing } from './route.ts';
+import { BORDER_STYLES, BORDER_WIDTHS, TEXT_ALIGNS, TEXT_VALIGNS } from './types.ts';
 import type { CanvasElement, DiagramIssue, DiagramType, Point, PresetStyle, ShapeKind, Theme } from './types.ts';
 
 export const esc = (s: unknown) =>
@@ -67,7 +69,11 @@ export function iconSvg(name: string | undefined, x: number, y: number, size: nu
   return `<g transform="translate(${n(x)} ${n(y)}) scale(${s})" fill="none" stroke="${esc(stroke)}" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="${esc(d)}"/></g>`;
 }
 
-export function shapeMarkup(kind: ShapeKind | string, x: number, y: number, w: number, h: number, attrs: string): string {
+/** `radius` overrides the corner rounding of `rect` and `rounded`; other shapes ignore it. */
+export function shapeMarkup(kind: ShapeKind | string, x: number, y: number, w: number, h: number, attrs: string, radius?: number): string {
+  if (radius !== undefined && (kind === 'rect' || kind === 'rounded' || !kind)) {
+    return `<rect x="${n(x)}" y="${n(y)}" width="${n(w)}" height="${n(h)}" rx="${n(Math.min(Math.max(0, radius), w / 2, h / 2))}" ${attrs}/>`;
+  }
   const r = x + w, b = y + h, cx = x + w / 2, cy = y + h / 2;
   const poly = (pts: number[][]) => `<polygon points="${pts.map((p) => `${n(p[0])},${n(p[1])}`).join(' ')}" ${attrs}/>`;
   const path = (d: string) => `<path d="${d}" ${attrs}/>`;
@@ -94,6 +100,20 @@ function arrowHead(tip: Point, from: Point, fill: string, size = 9) {
   const p = (d: number, off: number) => `${n(tip.x - d * Math.cos(a + off))},${n(tip.y - d * Math.sin(a + off))}`;
   return `<polygon points="${n(tip.x)},${n(tip.y)} ${p(size, 0.42)} ${p(size, -0.42)}" fill="${esc(fill)}"/>`;
 }
+
+/** Connector end markers chosen by an edge's `head` property. */
+export type HeadKind = 'arrow' | 'open' | 'diamond' | 'none';
+const headKind = (v?: string): HeadKind => (v === 'open' || v === 'diamond' || v === 'none' ? v : 'arrow');
+/** How far a line should stop short of the tip so it does not poke through the marker. */
+const headInset = (kind: HeadKind, size: number) => (kind === 'arrow' ? size * 0.6 : kind === 'diamond' ? size * 1.2 : 0);
+function headMarkup(kind: HeadKind, tip: Point, from: Point, stroke: string, size: number, width: number) {
+  if (kind === 'none') return '';
+  if (kind === 'arrow') return arrowHead(tip, from, stroke, size);
+  const a = Math.atan2(tip.y - from.y, tip.x - from.x);
+  const at = (d: number, off: number) => `${n(tip.x - d * Math.cos(a) - off * Math.sin(a))},${n(tip.y - d * Math.sin(a) + off * Math.cos(a))}`;
+  if (kind === 'open') return `<path d="M${at(size, size * 0.5)}L${n(tip.x)},${n(tip.y)}L${at(size, -size * 0.5)}" fill="none" stroke="${esc(stroke)}" stroke-width="${n(width)}" stroke-linecap="round" stroke-linejoin="round"/>`;
+  return `<polygon points="${n(tip.x)},${n(tip.y)} ${at(size * 0.9, size * 0.45)} ${at(size * 1.8, 0)} ${at(size * 0.9, -size * 0.45)}" fill="${esc(stroke)}"/>`;
+}
 const dashFor = (style?: string) => (style === 'dashed' ? 'stroke-dasharray="7 5"' : style === 'dotted' ? 'stroke-dasharray="1.5 5" stroke-linecap="round"' : '');
 
 function smooth(pts: Point[]) {
@@ -114,16 +134,6 @@ function clipToBox(box: { x: number; y: number; w: number; h: number }, to: Poin
   if (!dx && !dy) return { x: cx, y: cy };
   const s = Math.min(dx ? box.w / 2 / Math.abs(dx) : Infinity, dy ? box.h / 2 / Math.abs(dy) : Infinity);
   return { x: cx + dx * s, y: cy + dy * s };
-}
-
-/** Where a ray from a shape's centre towards `to` crosses its outline. */
-function clipToShape(box: Box, shape: string | undefined, to: Point): Point {
-  const cx = box.x + box.w / 2, cy = box.y + box.h / 2;
-  const dx = to.x - cx, dy = to.y - cy;
-  const rx = box.w / 2, ry = box.h / 2;
-  if (shape === 'diamond' && (dx || dy)) { const s = 1 / (Math.abs(dx) / rx + Math.abs(dy) / ry); return { x: cx + dx * s, y: cy + dy * s }; }
-  if ((shape === 'oval' || shape === 'ellipse' || shape === 'circle') && (dx || dy)) { const s = 1 / Math.hypot(dx / rx, dy / ry); return { x: cx + dx * s, y: cy + dy * s }; }
-  return clipToBox(box, to);
 }
 
 /** Picks readable text for a fill, so pale shapes stay legible in dark mode and vice versa. */
@@ -185,22 +195,112 @@ const sizeProp = (v: string | undefined, fallback: number) => {
 
 function nodeSize(id: string, props: Props, type: DiagramType): { w: number; h: number } {
   const auto = autoNodeSize(id, props, type);
-  return { w: sizeProp(props.w, auto.w), h: sizeProp(props.h, auto.h) };
+  const size = { w: sizeProp(props.w, auto.w), h: sizeProp(props.h, auto.h) };
+  if (props.shape !== 'circle') return size;
+  // A circle stays round: the larger side wins, so a resize in either direction still takes effect.
+  const side = props.w && !props.h ? size.w : props.h && !props.w ? size.h : Math.max(size.w, size.h);
+  return { w: side, h: side };
 }
+
+/** How much wider than its text a shape must be, because its outline cuts into the corners. */
+const SHAPE_SCALE: Record<string, number> = { diamond: 1.7, triangle: 1.7, hexagon: 1.3, parallelogram: 1.3, cloud: 1.3, oval: 1.15, ellipse: 1.15, circle: 1.15 };
 
 function autoNodeSize(id: string, props: Props, type: DiagramType): { w: number; h: number } {
   const label = props.label ?? id;
+  const fs = fontSizeOf(props);
+  const lh = (fs * 17) / 13;
+  const shape = props.shape ?? 'rect';
+  const scale = SHAPE_SCALE[shape] ?? 1;
   if (type === 'flowchart') {
-    const shape = props.shape ?? 'rect';
-    const scale = shape === 'diamond' ? 1.7 : shape === 'hexagon' || shape === 'parallelogram' ? 1.3 : 1;
-    const lines = wrapText(label, 180, 13);
-    const w = Math.max(...lines.map((l) => textWidth(l, 13)), 70) + 34;
-    return { w: Math.max(120, w * scale), h: Math.max(shape === 'diamond' ? 90 : 56, lines.length * 17 + 26 * scale) };
+    const lines = wrapText(label, 180, fs);
+    const w = Math.max(...lines.map((l) => textWidth(l, fs)), 70) + 34;
+    return { w: Math.max(120, w * scale), h: Math.max(shape === 'diamond' || shape === 'triangle' ? 90 : 56, lines.length * lh + 26 * scale) };
   }
-  const lines = wrapText(label, 130, 13);
+  const lines = wrapText(label, 130, fs);
   const notes = props.description ? wrapText(props.description, 150, 11) : [];
-  const w = Math.max(...lines.map((l) => textWidth(l, 13)), ...notes.map((l) => textWidth(l, 11)), 40) + 28;
-  return { w: Math.max(96, w), h: (iconPath(props.icon) ? 46 : 14) + lines.length * 17 + notes.length * 14 + 14 };
+  const w = Math.max(...lines.map((l) => textWidth(l, fs)), ...notes.map((l) => textWidth(l, 11)), 40) + 28;
+  const h = (iconPath(props.icon) ? 46 : 14) + lines.length * lh + notes.length * 14 + 14;
+  return { w: Math.max(96, w * scale), h: scale > 1.5 ? Math.max(90, h * 1.4) : h };
+}
+
+// ---- node style properties ----
+
+const truthy = (v?: string) => v === 'true';
+const numProp = (v: string | undefined, min: number, max: number) => {
+  const x = v === undefined || v.trim() === '' ? NaN : Number(v);
+  return Number.isFinite(x) ? Math.min(max, Math.max(min, x)) : undefined;
+};
+const fontSizeOf = (props: Props) => numProp(props.fontSize, 6, 72) ?? 13;
+
+/** Stroke width for a `border:` value: none | thin | medium | thick, or pixels from 0 to 20. */
+export function borderWidth(v: string | undefined, fallback: number): number {
+  if (v && Object.hasOwn(BORDER_WIDTHS, v)) return BORDER_WIDTHS[v as keyof typeof BORDER_WIDTHS];
+  return numProp(v, 0, 20) ?? fallback;
+}
+
+/** Opacity for an `opacity:` value, 0 to 1 or a percentage (`50%`, or any number above 1). */
+export function opacityOf(v: string | undefined): number | undefined {
+  const m = v && /^(\d*\.?\d+)(%?)$/.exec(v.trim());
+  if (!m) return undefined;
+  const x = Number(m[1]);
+  return Math.min(1, Math.max(0, m[2] || x > 1 ? x / 100 : x));
+}
+
+interface NodeStyle {
+  /** fill, stroke, width and dash attributes for the outline */
+  attrs: string;
+  stroke: string;
+  /** colour for an icon: the node colour, else the border */
+  accent: string;
+  textColor: string;
+  fontSize: number;
+  /** font-weight and font-style attributes for the label */
+  font: string;
+  align: 'left' | 'center' | 'right';
+  valign?: 'top' | 'middle' | 'bottom';
+  radius?: number;
+  opacity?: number;
+  /** whether any outline property was written, so an icon node should draw its outline */
+  outlined: boolean;
+}
+
+function nodeStyle(props: Props, c: Ctx, strokeWidth: number): NodeStyle {
+  const col = color(props.color, c.preset) ?? color(c.preset?.defaultNodeColor, c.preset);
+  // Unstyled components and shapes get a carbon-black outline in light mode and a light-gray one in dark mode.
+  const ink = c.opts.theme === 'dark' ? '#c9ced6' : '#20232a';
+  const stroke = color(props.borderColor, c.preset) ?? col ?? ink;
+  const noFill = !!props.fill && /^(none|transparent)$/i.test(props.fill);
+  const fill = color(props.fill, c.preset);
+  const sw = borderWidth(props.border, strokeWidth);
+  const dash = BORDER_STYLES.includes(props.borderStyle as never) ? dashFor(props.borderStyle) : '';
+  const fillAttr = noFill ? 'transparent' : fill ?? (col ? `${col}22` : c.p.surface);
+  const strokeAttr = sw > 0 ? `stroke="${esc(stroke)}" stroke-width="${n(sw)}" ${dash}` : 'stroke="none"';
+  const align = TEXT_ALIGNS.includes(props.align as never) ? (props.align as NodeStyle['align']) : 'center';
+  const valign = TEXT_VALIGNS.includes(props.valign as never) ? (props.valign as NodeStyle['valign']) : undefined;
+  return {
+    attrs: `fill="${esc(fillAttr)}" ${strokeAttr}`.trim(),
+    stroke,
+    accent: col ?? stroke,
+    textColor: color(props.textColor, c.preset) ?? (fill ? textOn(fill, c.p) : c.p.fg),
+    fontSize: fontSizeOf(props),
+    font: `${truthy(props.bold) ? 'font-weight="700" ' : ''}${truthy(props.italic) ? 'font-style="italic"' : ''}`.trim(),
+    align, valign,
+    radius: numProp(props.radius, 0, 320),
+    opacity: opacityOf(props.opacity),
+    outlined: true,
+  };
+}
+
+/** Horizontal inset that keeps aligned text inside a shape's outline. */
+const shapeInset = (shape: string, w: number) =>
+  shape === 'diamond' || shape === 'triangle' ? w * 0.25 : shape === 'hexagon' || shape === 'parallelogram' || shape === 'cloud' ? Math.min(w / 5, 24) + 8 : shape === 'circle' || shape === 'oval' || shape === 'ellipse' ? w * 0.15 + 8 : 13;
+
+/** Where a block of text of height `blockH` sits in a box: x and anchor from `align`, the centre y from `valign`. */
+function placeBlock(b: Box, s: NodeStyle, blockH: number, inset: number, padY = 10) {
+  const x = s.align === 'left' ? b.x + inset : s.align === 'right' ? b.x + b.w - inset : b.x + b.w / 2;
+  const anchor = s.align === 'left' ? 'start' : s.align === 'right' ? 'end' : 'middle';
+  const top = s.valign === 'top' ? b.y + padY : s.valign === 'bottom' ? b.y + b.h - padY - blockH : b.y + (b.h - blockH) / 2;
+  return { x, anchor, top };
 }
 
 function edgeStyle(e: GraphEdge) {
@@ -212,23 +312,42 @@ function edgeStyle(e: GraphEdge) {
   };
 }
 
-function renderEdge(pts: Point[], e: GraphEdge, c: Ctx) {
+/** An edge's `routing` property: elbow (default), straight or curved. */
+const routingOf = (v?: string): Routing => (v === 'straight' ? 'straight' : v === 'curved' || v === 'curve' ? 'curved' : 'elbow');
+const EDGE_RADIUS = 6;
+const labelLines = (label: string) => wrapText(label, 150, 11);
+const labelSize = (label: string) => {
+  const lines = labelLines(label);
+  return { w: Math.max(...lines.map((l) => textWidth(l, 11))) + 12, h: lines.length * 14 + 6 };
+};
+
+/** Draws one routed connection: a wide invisible hit line, the line itself, its end markers and its label. */
+function drawEdge(r: Route, e: GraphEdge, index: number, c: Ctx, label?: Box | null, base = { width: 1.5, head: 9 }) {
   const stroke = color(e.props.color, c.preset) ?? c.p.line;
   const st = edgeStyle(e);
-  let out = `<path d="${smooth(pts)}" fill="none" stroke="${esc(stroke)}" stroke-width="${esc(/^\d+(\.\d+)?$/.test(e.props.width ?? '') ? e.props.width : 1.5)}" ${dashFor(st.style)}/>`;
-  if (st.endHead && pts.length > 1) out += arrowHead(pts.at(-1)!, pts.at(-2)!, stroke);
-  if (st.startHead && pts.length > 1) out += arrowHead(pts[0], pts[1], stroke);
-  if (e.label) {
-    const m = pts[Math.floor((pts.length - 1) / 2)], m2 = pts[Math.ceil((pts.length - 1) / 2)];
-    const x = (m.x + m2.x) / 2, y = (m.y + m2.y) / 2;
-    const lines = wrapText(e.label, 150, 11);
-    const w = Math.max(...lines.map((l) => textWidth(l, 11))) + 10, h = lines.length * 14 + 4;
-    out += `<rect x="${n(x - w / 2)}" y="${n(y - h / 2)}" width="${n(w)}" height="${n(h)}" rx="3" fill="${esc(c.p.bg)}" opacity="0.9"/>` + svgText(lines, x, y, 11, c.p.muted);
+  const width = /^\d+(\.\d+)?$/.test(e.props.width ?? '') ? Math.min(20, Number(e.props.width)) : base.width;
+  const kind = headKind(e.props.head);
+  const size = base.head + Math.max(0, width - 1.5) * 1.5;
+  const startK: HeadKind = st.startHead ? kind : 'none', endK: HeadKind = st.endHead ? kind : 'none';
+  const ends = routeEnds(r);
+  // The visible line stops at the base of a solid marker so its end does not poke through the tip.
+  const line = routePath(trimRoute(r, headInset(startK, size), headInset(endK, size)), EDGE_RADIUS);
+  let out = `<g data-edge="${index}"><path d="${routePath(r, EDGE_RADIUS)}" fill="none" stroke="transparent" stroke-width="14"/>` +
+    `<path d="${line}" fill="none" stroke="${esc(stroke)}" stroke-width="${n(width)}" stroke-linejoin="round" ${dashFor(st.style)}/>` +
+    headMarkup(endK, ends.end[0], ends.end[1], stroke, size, width) + headMarkup(startK, ends.start[0], ends.start[1], stroke, size, width);
+  if (e.label && label) {
+    const cx = label.x + label.w / 2, cy = label.y + label.h / 2;
+    out += `<rect x="${n(label.x)}" y="${n(label.y)}" width="${n(label.w)}" height="${n(label.h)}" rx="4" fill="${esc(c.p.bg)}" stroke="${esc(c.p.line)}" stroke-opacity="0.25"/>` +
+      svgText(labelLines(e.label), cx, cy, 11, c.p.muted);
   }
-  return out;
+  return out + '</g>';
 }
 
-interface GraphLayout { boxes: Map<string, Box>; edges: { e: GraphEdge; pts: Point[] }[]; width: number; height: number; dx: number; dy: number }
+/** The outline a connector attaches to, from a node's shape. */
+const outlineOf = (shape?: string): Outline => (shape === 'diamond' ? 'diamond' : shape === 'oval' || shape === 'ellipse' || shape === 'circle' ? 'ellipse' : 'rect');
+
+interface LaidEdge { e: GraphEdge; route: Route; label?: Box | null }
+interface GraphLayout { boxes: Map<string, Box>; edges: LaidEdge[]; width: number; height: number; dx: number; dy: number }
 
 function layoutGraph(d: ParsedDiagram, c: Ctx, sized: (id: string, props: Props) => { w: number; h: number }): GraphLayout {
   const dirs: Record<string, string> = { right: 'LR', left: 'RL', down: 'TB', up: 'BT' };
@@ -290,35 +409,32 @@ function layoutGraph(d: ParsedDiagram, c: Ctx, sized: (id: string, props: Props)
   };
   d.nodes.filter((x) => !x.parent).forEach((x) => refit(x.id));
 
-  const touched = (id: string) => {
-    for (let cur: string | undefined = id; cur; cur = d.nodes.find((x) => x.id === cur)?.parent) if (movedSet.has(cur)) return true;
-    return false;
-  };
-  const edges: GraphLayout['edges'] = [];
-  d.edges.forEach((e, i) => {
-    const a = boxes.get(e.from), b = boxes.get(e.to);
-    if (!a || !b || isAncestor(e.from, e.to) || isAncestor(e.to, e.from) || e.from === e.to) return;
-    const u = firstLeaf(e.from) ?? e.from, w = firstLeaf(e.to) ?? e.to;
-    const reversedOp = e.op === '<';
-    const edge = g.edge({ v: reversedOp ? w : u, w: reversedOp ? u : w, name: String(i) }) as { points: Point[] } | undefined;
-    const direct = !edge || touched(e.from) || touched(e.to) || groupIds.has(e.from) || groupIds.has(e.to);
-    let pts: Point[];
-    if (direct) {
-      const ca = { x: a.x + a.w / 2, y: a.y + a.h / 2 }, cb = { x: b.x + b.w / 2, y: b.y + b.h / 2 };
-      pts = [clipToBox(a, cb), clipToBox(b, ca)];
-    } else pts = reversedOp ? [...edge!.points].reverse() : edge!.points;
-    edges.push({ e, pts });
+  // Connectors are routed from the final boxes, so dragged nodes get fresh, tidy paths.
+  const nodeById = new Map(d.nodes.map((x) => [x.id, x]));
+  const routeNodes: RouteNode[] = [...boxes].map(([id, box]) => {
+    const x = nodeById.get(id)!;
+    return { id, box, parent: x.parent, group: x.isGroup, shape: x.isGroup ? 'rect' : outlineOf(x.props.shape) };
   });
+  const kept = d.edges.filter((e) => boxes.has(e.from) && boxes.has(e.to) && e.from !== e.to && !isAncestor(e.from, e.to) && !isAncestor(e.to, e.from));
+  const dirName = d.directives.direction ?? c.preset?.direction ?? defaultDir;
+  const direction = (dirs[dirName] ? dirName : defaultDir) as Direction;
+  const routes = routeEdges(routeNodes, kept.map((e) => ({ from: e.from, to: e.to, routing: routingOf(e.props.routing), bundle: !edgeStyle(e).startHead })), { direction });
+  const labels = placeLabels(routes, kept.map((e) => (e.label ? labelSize(e.label) : null)), routeNodes.filter((r) => !r.group).map((r) => r.box));
+  let edges: LaidEdge[] = kept.flatMap((e, i) => (routes[i] ? [{ e, route: routes[i]!, label: labels[i] }] : []));
 
   let maxX = 0, maxY = 0, minX = Infinity, minY = Infinity;
-  for (const b of boxes.values()) { maxX = Math.max(maxX, b.x + b.w); maxY = Math.max(maxY, b.y + b.h); minX = Math.min(minX, b.x); minY = Math.min(minY, b.y); }
-  for (const { pts } of edges) for (const p of pts) { maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y); minX = Math.min(minX, p.x); minY = Math.min(minY, p.y); }
+  const grow = (x0: number, y0: number, x1: number, y1: number) => { maxX = Math.max(maxX, x1); maxY = Math.max(maxY, y1); minX = Math.min(minX, x0); minY = Math.min(minY, y0); };
+  for (const b of boxes.values()) grow(b.x, b.y, b.x + b.w, b.y + b.h);
+  for (const { route, label } of edges) {
+    for (const p of route.points) grow(p.x, p.y, p.x, p.y);
+    if (label) grow(label.x, label.y, label.x + label.w, label.y + label.h);
+  }
   // Moved nodes can leave the origin in either direction, so the content is kept tight against the margin.
   const anchored = movedSet.size > 0 && Number.isFinite(minX);
   const dx = anchored ? 28 - minX : 0, dy = anchored ? 28 - minY : 0;
   if (dx || dy) {
     for (const b of boxes.values()) { b.x += dx; b.y += dy; }
-    for (const ed of edges) ed.pts = ed.pts.map((p) => ({ x: p.x + dx, y: p.y + dy }));
+    edges = edges.map((ed) => ({ ...ed, route: translateRoute(ed.route, dx, dy), label: ed.label && { ...ed.label, x: ed.label.x + dx, y: ed.label.y + dy } }));
     maxX += dx; maxY += dy;
   }
   return { boxes, edges, width: maxX + 28, height: maxY + 28, dx, dy };
@@ -337,6 +453,56 @@ function linked(body: string, props: Props) {
   return url ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${body}</a>` : body;
 }
 
+/** One architecture or flow chart node: its outline, icon, label and description, styled by its properties. */
+function renderGraphNode(id: string, props: Props, b: Box, type: DiagramType, c: Ctx): string {
+  const label = props.label ?? id;
+  const flow = type === 'flowchart';
+  const s = nodeStyle(props, c, flow ? 1.5 : 1.3);
+  const shape = props.shape ?? 'rect';
+  const hasIcon = !!iconPath(props.icon);
+  // Text grows with the box too, unless a fontSize is set: a default-sized box keeps the default size.
+  // Only boxes sized by hand (w or h set) scale; auto-sized boxes already fit their content.
+  const sized = props.w !== undefined || props.h !== undefined;
+  const grow = props.fontSize || !sized ? 1 : Math.min(2.5, Math.max(1, Math.min(b.w, b.h) / 110));
+  const fs = s.fontSize * grow, lh = fs * 1.25, noteFs = 11 * grow;
+  const inset = shapeInset(shape, b.w);
+  // Icons grow with the box: the default size at a default-sized box, larger as the box is resized.
+  const icon = !sized ? (flow ? 18 : 30) : flow ? Math.min(56, Math.max(18, Math.min(b.w, b.h) * 0.25)) : Math.min(120, Math.max(30, Math.min(b.w, b.h) * 0.32));
+  const text = (lines: string[], x: number, y: number, anchor: string) => svgText(lines, x, y, fs, s.textColor, anchor, s.font);
+  const outline = shapeMarkup(shape, b.x, b.y, b.w, b.h, s.attrs, s.radius);
+  let body: string;
+  if (flow) {
+    // A flow chart icon sits to the left of the label.
+    const iconInset = hasIcon && s.align === 'left' ? Math.max(inset, icon + 16) : inset;
+    const lines = wrapText(label, s.align === 'center' ? b.w - 26 : b.w - iconInset - inset, fs);
+    const p = placeBlock(b, s, lines.length * lh, iconInset);
+    const y = p.top + (lines.length * lh) / 2;
+    body = outline + (hasIcon ? iconSvg(props.icon, b.x + 10, y - icon / 2, icon, s.accent) : '') +
+      text(lines, p.x + (hasIcon && s.align === 'center' ? 8 : 0), y, p.anchor);
+  } else {
+    const wrapW = s.align === 'center' ? b.w - 14 : b.w - inset * 2;
+    const lines = wrapText(label, wrapW, fs);
+    const notes = props.description ? wrapText(props.description, wrapW, noteFs) : [];
+    const noteH = notes.length * noteFs * 1.25;
+    const noteColor = props.textColor || props.fill ? s.textColor : c.p.muted;
+    const iconH = hasIcon ? icon + 1 : 0;
+    const blockH = iconH + lines.length * lh + (notes.length ? noteH + 2 : 0);
+    // Content is centred vertically unless `valign` says otherwise, so a resized box keeps it in the middle.
+    const p = placeBlock(b, s, blockH, inset, hasIcon ? 7 : 10);
+    const top = p.top;
+    const labelY = top + iconH + (lines.length * lh) / 2;
+    const notesY = top + iconH + lines.length * lh + 2 + noteH / 2;
+    const iconX = s.align === 'left' ? b.x + inset : s.align === 'right' ? b.x + b.w - inset - icon : b.x + b.w / 2 - icon / 2;
+    // Icon nodes have no outline of their own unless one is styled; a transparent box keeps them clickable.
+    body = (hasIcon && !s.outlined ? `<rect x="${n(b.x)}" y="${n(b.y)}" width="${n(b.w)}" height="${n(b.h)}" fill="transparent"/>` : outline) +
+      (hasIcon ? iconSvg(props.icon, iconX, top, icon, s.accent) : '') +
+      text(lines, p.x, labelY, p.anchor) +
+      (notes.length ? svgText(notes, p.x, notesY, noteFs, noteColor, p.anchor, noteColor === c.p.muted ? '' : 'opacity="0.8"') : '');
+  }
+  const op = s.opacity !== undefined && s.opacity < 1 ? ` opacity="${n(s.opacity)}"` : '';
+  return `<g data-node="${esc(id)}"${op} ${shadowAttr(c)}>${linked(body, props)}</g>`;
+}
+
 function renderGraph(d: ParsedDiagram, c: Ctx): { body: string; width: number; height: number } {
   const L = layoutGraph(d, c, (id, props) => nodeSize(id, props, d.type));
   let out = '';
@@ -344,59 +510,27 @@ function renderGraph(d: ParsedDiagram, c: Ctx): { body: string; width: number; h
   for (const x of d.nodes.filter((k) => k.isGroup).sort((a, b) => depth(a.id) - depth(b.id))) {
     const b = L.boxes.get(x.id);
     if (!b) continue;
-    const col = color(x.props.color, c.preset) ?? c.p.muted;
-    const icon = iconSvg(x.props.icon, b.x + 9, b.y + 7, 18, col);
-    out += `<g data-node="${esc(x.id)}">` + linked(
-      `<rect x="${n(b.x)}" y="${n(b.y)}" width="${n(b.w)}" height="${n(b.h)}" rx="8" fill="${esc(x.props.color ? `${col}12` : c.p.group)}" stroke="${esc(col)}" stroke-opacity="0.65" stroke-dasharray="${x.parent ? '5 4' : '0'}"/>` +
-      icon + svgText([x.props.label ?? x.id], b.x + (icon ? 32 : 12), b.y + 16, 12, x.props.color ? col : c.p.muted, 'start', 'font-weight="600"'), x.props) + '</g>';
+    const gp = x.props;
+    const col = color(gp.color, c.preset) ?? c.p.muted;
+    const icon = iconSvg(gp.icon, b.x + 9, b.y + 7, 18, col);
+    // Groups take the same style properties as nodes, on top of their own lighter defaults.
+    const stroke = color(gp.borderColor, c.preset) ?? col;
+    const sw = borderWidth(gp.border, 1);
+    const dash = BORDER_STYLES.includes(gp.borderStyle as never) ? dashFor(gp.borderStyle) : `stroke-dasharray="${x.parent ? '5 4' : '0'}"`;
+    const fill = gp.fill && /^(none|transparent)$/i.test(gp.fill) ? 'transparent' : color(gp.fill, c.preset) ?? (gp.color ? `${col}12` : c.p.group);
+    const strokeAttr = sw > 0 ? `stroke="${esc(stroke)}" stroke-width="${n(sw)}" stroke-opacity="${gp.borderColor ? 1 : 0.65}" ${dash}` : 'stroke="none"';
+    const font = `font-weight="${truthy(gp.bold) ? 700 : 600}"${truthy(gp.italic) ? ' font-style="italic"' : ''}`;
+    const textColor = color(gp.textColor, c.preset) ?? (gp.color ? col : c.p.muted);
+    const op = opacityOf(gp.opacity);
+    out += `<g data-node="${esc(x.id)}"${op !== undefined && op < 1 ? ` opacity="${n(op)}"` : ''}>` + linked(
+      `<rect x="${n(b.x)}" y="${n(b.y)}" width="${n(b.w)}" height="${n(b.h)}" rx="${n(Math.min(numProp(gp.radius, 0, 320) ?? 8, b.w / 2, b.h / 2))}" fill="${esc(fill)}" ${strokeAttr}/>` +
+      icon + svgText([gp.label ?? x.id], b.x + (icon ? 32 : 12), b.y + 16, numProp(gp.fontSize, 6, 24) ?? 12, textColor, 'start', font), gp) + '</g>';
   }
-  if (d.type === 'flowchart') {
-    const shapeOf = (id: string) => d.nodes.find((k) => k.id === id)?.props.shape;
-    for (const ed of L.edges) {
-      if (ed.pts.length < 2) continue;
-      // Dagre clips edges to bounding boxes, which leaves gaps at diamonds and ovals.
-      const first = ed.e.from, last = ed.e.to;
-      const A = L.boxes.get(first), B = L.boxes.get(last);
-      const pts = [...ed.pts];
-      if (A) pts[0] = clipToShape(A, shapeOf(first), pts[1]);
-      if (B) pts[pts.length - 1] = clipToShape(B, shapeOf(last), pts[pts.length - 2]);
-      ed.pts = pts;
-    }
-  }
-  for (const { e, pts } of L.edges) {
-    // A wide invisible stroke keeps thin connections easy to click.
-    out += `<g data-edge="${d.edges.indexOf(e)}"><path d="${smooth(pts)}" fill="none" stroke="transparent" stroke-width="14"/>${renderEdge(pts, e, c)}</g>`;
-  }
+  for (const { e, route, label } of L.edges) out += drawEdge(route, e, d.edges.indexOf(e), c, label);
   for (const x of d.nodes.filter((k) => !k.isGroup)) {
     const b = L.boxes.get(x.id);
     if (!b) continue;
-    const label = x.props.label ?? x.id;
-    const col = color(x.props.color, c.preset) ?? color(c.preset?.defaultNodeColor, c.preset);
-    const stroke = col ?? c.p.line;
-    let body: string;
-    if (d.type === 'flowchart') {
-      const attrs = `fill="${esc(col ? `${col}22` : c.p.surface)}" stroke="${esc(stroke)}" stroke-width="1.5"`;
-      const shape = x.props.shape ?? 'rect';
-      const lines = wrapText(label, b.w - 26, 13);
-      const iconB = iconPath(x.props.icon);
-      body = shapeMarkup(shape, b.x, b.y, b.w, b.h, attrs) +
-        (iconB ? iconSvg(x.props.icon, b.x + 10, b.y + b.h / 2 - 9, 18, stroke) : '') +
-        svgText(lines, b.x + b.w / 2 + (iconB ? 8 : 0), b.y + b.h / 2, 13, c.p.fg);
-    } else {
-      const hasIcon = !!iconPath(x.props.icon);
-      const lines = wrapText(label, b.w - 14, 13);
-      const notes = x.props.description ? wrapText(x.props.description, b.w - 14, 11) : [];
-      const noteText = (labelY: number) => (notes.length ? svgText(notes, b.x + b.w / 2, labelY + (lines.length * 16 + notes.length * 14) / 2 + 1, 11, c.p.muted) : '');
-      if (hasIcon) {
-        // Icon nodes have no fill of their own, so a transparent box makes the whole node clickable.
-        const labelY = b.y + 46 + (lines.length - 1) * 8;
-        body = `<rect x="${n(b.x)}" y="${n(b.y)}" width="${n(b.w)}" height="${n(b.h)}" fill="transparent"/>` + iconSvg(x.props.icon, b.x + b.w / 2 - 15, b.y + 7, 30, stroke) + svgText(lines, b.x + b.w / 2, labelY, 13, c.p.fg) + noteText(labelY);
-      } else {
-        const labelY = b.y + b.h / 2 - notes.length * 7;
-        body = shapeMarkup('rect', b.x, b.y, b.w, b.h, `fill="${esc(col ? `${col}22` : c.p.surface)}" stroke="${esc(stroke)}" stroke-width="1.3"`) + svgText(lines, b.x + b.w / 2, labelY, 13, c.p.fg) + noteText(labelY);
-      }
-    }
-    out += `<g data-node="${esc(x.id)}" ${shadowAttr(c)}>${linked(body, x.props)}</g>`;
+    out += renderGraphNode(x.id, x.props, b, d.type, c);
   }
   return { body: out, width: L.width, height: L.height };
 }
@@ -650,41 +784,18 @@ function renderBpmn(d: ParsedDiagram, c: Ctx) {
     if (l.id) out += `<text transform="translate(${n(x0 + hw / 2)} ${n(l.y + l.h / 2)}) rotate(-90)" text-anchor="middle" dominant-baseline="central" font-size="13" font-weight="600" fill="${esc(c.p.fg)}">${esc(l.props.label ?? l.id)}</text>`;
     out += '</g>';
   }
-  for (const e of d.edges) {
-    const a = pos.get(e.from), b = pos.get(e.to);
-    if (!a || !b) continue;
-    const ca = { x: a.x + a.w / 2, y: a.y + a.h / 2 }, cb = { x: b.x + b.w / 2, y: b.y + b.h / 2 };
-    let pts: Point[];
-    // A same-row edge that would cross another node arcs over the top of it instead.
-    const blocked = [...pos.entries()].some(([id, o]) => id !== e.from && id !== e.to && o.x + o.w > Math.min(ca.x, cb.x) && o.x < Math.max(ca.x, cb.x) && o.y < ca.y && o.y + o.h > ca.y);
-    if (Math.abs(ca.y - cb.y) < 2 && blocked) {
-      const top = Math.min(a.y, b.y) - 12;
-      pts = [{ x: ca.x, y: a.y }, { x: ca.x, y: top }, { x: cb.x, y: top }, { x: cb.x, y: b.y }];
-    } else if (Math.abs(ca.y - cb.y) < 2) pts = [clipToBox(a, cb), clipToBox(b, ca)];
-    else {
-      const start = { x: a.x + a.w, y: ca.y };
-      const midX = cb.x > start.x ? cb.x : start.x + 20;
-      pts = cb.x > start.x
-        ? [start, { x: midX, y: ca.y }, { x: midX, y: ca.y < cb.y ? b.y : b.y + b.h }]
-        : [start, { x: midX, y: ca.y }, { x: midX, y: Math.min(a.y, b.y) - 14 }, { x: cb.x, y: Math.min(a.y, b.y) - 14 }, { x: cb.x, y: b.y }];
-    }
-    const stroke = color(e.props.color, c.preset) ?? c.p.line;
-    const st = edgeStyle(e);
-    const polyPoints = pts.map((p) => `${n(p.x)},${n(p.y)}`).join(' ');
-    out += `<g data-edge="${d.edges.indexOf(e)}"><polyline points="${polyPoints}" fill="none" stroke="transparent" stroke-width="14"/><polyline points="${polyPoints}" fill="none" stroke="${esc(stroke)}" stroke-width="1.4" ${dashFor(st.style)}/>`;
-    if (st.endHead) out += arrowHead(pts.at(-1)!, pts.at(-2)!, stroke, 8);
-    if (e.label) {
-      // Labels sit on the edge's longest run, so branches leaving one gateway don't collide.
-      let best = 0, bestLen = -1;
-      for (let i = 0; i < pts.length - 1; i++) {
-        const len = Math.hypot(pts[i + 1].x - pts[i].x, pts[i + 1].y - pts[i].y);
-        if (len > bestLen) { bestLen = len; best = i; }
-      }
-      const mx = (pts[best].x + pts[best + 1].x) / 2, my = (pts[best].y + pts[best + 1].y) / 2, w = textWidth(e.label, 11) + 8;
-      out += `<rect x="${n(mx - w / 2)}" y="${n(my - 8)}" width="${n(w)}" height="16" rx="3" fill="${esc(c.p.bg)}"/>` + svgText([e.label], mx, my, 11, c.p.muted);
-    }
-    out += '</g>';
-  }
+  // Events and gateways carry their caption underneath, so other connectors keep clear of it too.
+  const routeNodes: RouteNode[] = tasks.flatMap((t) => {
+    const b = pos.get(t.id);
+    if (!b) return [];
+    const kind = t.props.type ?? 'activity';
+    const caption = kind === 'event' || kind === 'gateway' ? wrapText(t.props.label ?? t.id, 120, 11).length * 14 + 8 : 0;
+    return [{ id: t.id, box: b, shape: kind === 'event' ? 'ellipse' : kind === 'gateway' ? 'diamond' : 'rect', keepOut: { ...b, h: b.h + caption } } satisfies RouteNode];
+  });
+  const flows = d.edges.filter((e) => pos.has(e.from) && pos.has(e.to) && e.from !== e.to);
+  const routes = routeEdges(routeNodes, flows.map((e) => ({ from: e.from, to: e.to, routing: routingOf(e.props.routing), bundle: !edgeStyle(e).startHead })), { direction: 'right' });
+  const labels = placeLabels(routes, flows.map((e) => (e.label ? labelSize(e.label) : null)), routeNodes.map((r) => r.keepOut ?? r.box));
+  flows.forEach((e, i) => { if (routes[i]) out += drawEdge(routes[i]!, e, d.edges.indexOf(e), c, labels[i], { width: 1.4, head: 8 }); });
   for (const t of tasks) {
     const b = pos.get(t.id);
     if (!b) continue;

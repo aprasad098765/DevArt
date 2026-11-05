@@ -63,12 +63,24 @@ function descendants(d: ParsedDiagram, id: string) {
   return out;
 }
 
-export function setNodeProps(type: DiagramType, code: string, id: string, patch: Record<string, string | undefined>) {
+/** A value for one property in a patch: empty, undefined, null or false removes the key; true writes `true`. */
+export type PropValue = string | number | boolean | null | undefined;
+
+/** The string a patch value is written as, or undefined when it removes the property. */
+export function propText(v: PropValue): string | undefined {
+  if (v === undefined || v === null || v === false) return undefined;
+  if (typeof v === 'number') return Number.isFinite(v) ? String(Math.round(v * 100) / 100) : undefined;
+  // Not trimmed, so a label being typed keeps its trailing space.
+  return String(v) || undefined;
+}
+
+/** Sets or clears node properties, style ones included (`{ border: 'thick', bold: true, fontSize: 14, fill: undefined }`). */
+export function setNodeProps(type: DiagramType, code: string, id: string, patch: Record<string, PropValue>) {
   const d = parseDiagram(type, code);
   const node = d.nodes.find((n) => n.id === id);
   if (!node) return code;
   const props: Props = { ...node.props };
-  for (const [k, v] of Object.entries(patch)) { if (v) props[k] = v; else delete props[k]; }
+  for (const [k, raw] of Object.entries(patch)) { const v = propText(raw); if (v !== undefined) props[k] = v; else delete props[k]; }
 
   const lines = code.split(/\r?\n/);
   const onEdges = edgeLines(d);

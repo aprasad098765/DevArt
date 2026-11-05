@@ -224,3 +224,26 @@ test('moving a component into a group survives with its position kept', () => {
   assert.equal(node(next.code!, 'A')!.parent, 'G');
   assert.deepEqual(onScreen(next, 'A'), onScreen(el, 'A'));
 });
+
+test('style properties round-trip through the code, and clear cleanly', () => {
+  const style = { shape: 'circle', border: 'thick', borderStyle: 'dashed', borderColor: '#ff0000', radius: 6, fill: 'blue', opacity: 0.5, textColor: '#ff0000', fontSize: 14, bold: true, italic: true, align: 'left', valign: 'top' };
+  const next = setNodeProps(T, CODE, 'DB', style);
+  assert.deepEqual(node(next, 'DB')!.props, {
+    icon: 'database', shape: 'circle', border: 'thick', borderStyle: 'dashed', borderColor: '#ff0000', radius: '6', fill: 'blue',
+    opacity: '0.5', textColor: '#ff0000', fontSize: '14', bold: 'true', italic: 'true', align: 'left', valign: 'top',
+  });
+  assert.deepEqual(parse(next).issues, []);
+  assert.ok(next.includes('DB [icon: database, shape: circle, border: thick, borderStyle: dashed, borderColor: #ff0000, radius: 6'));
+  const cleared = setNodeProps(T, next, 'DB', Object.fromEntries(Object.keys(style).map((k) => [k, k === 'bold' ? false : undefined])));
+  assert.deepEqual(node(cleared, 'DB')!.props, { icon: 'database' });
+  assert.equal(cleared, CODE, 'clearing every style property restores the original code');
+});
+
+test('style properties on a node only named in a connection get a declaration, and zero is kept', () => {
+  const next = setNodeProps(T, CODE, 'Queue', { border: 0, opacity: '0', fill: '' });
+  assert.deepEqual(node(next, 'Queue')!.props, { border: '0', opacity: '0' });
+  assert.equal(parse(next).edges.length, parse(CODE).edges.length);
+  const grouped = setNodeProps(T, CODE, 'Cloud', { borderStyle: 'dotted', fill: '#eef' });
+  assert.deepEqual(node(grouped, 'Cloud')!.props, { icon: 'cloud', color: 'blue', borderStyle: 'dotted', fill: '#eef' });
+  assert.ok(grouped.includes('Cloud [icon: cloud, color: blue, borderStyle: dotted, fill: #eef] {'));
+});

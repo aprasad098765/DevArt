@@ -5,6 +5,8 @@ import { CLOSE_GONE, closeConnections, dropLive, flush, mutate, readContent, rep
 import { canvasSvg, convert, diagramSvg, type ExportFormat } from './exporter.ts';
 import { renderDiagram, diagramSize, elementBounds } from '../shared/render.ts';
 import { SYNTAX_REFERENCE } from '../shared/dsl.ts';
+import { toMermaid } from '../shared/mermaid.ts';
+import { TEMPLATES, templateById } from '../shared/templates.ts';
 import { ICON_ALIASES, ICON_NAMES } from '../shared/icons.ts';
 import { DIAGRAM_TYPES, type CanvasElement, type DiagramType, type Theme } from '../shared/types.ts';
 
@@ -48,6 +50,9 @@ function createFile(teamId: string, ownerId: string, title: string) {
 
 const isType = (t: unknown): t is DiagramType => DIAGRAM_TYPES.includes(t as DiagramType);
 const themeOf = (t: unknown): Theme => (t === 'dark' ? 'dark' : 'light');
+/** Export without a background fill, from `transparent=1` or the older `background=0`. */
+const isTransparent = (background: unknown, transparent: unknown) =>
+  [false, '0', 'false'].includes(background as any) || [true, '1', 'true'].includes(transparent as any);
 
 /** Places a new element clear of existing content so diagrams drawn through MCP don't overlap. */
 function placed(fileId: string, w: number) {
@@ -151,16 +156,24 @@ export function buildApi() {
 
   // ---- render and export ----
   r.post('/render', wrap(async (req, res) => {
-    const { type, code, theme, format, scale } = req.body ?? {};
+    const { type, code, theme, format, scale, background, transparent } = req.body ?? {};
     if (!isType(type)) throw bad(`type must be one of: ${DIAGRAM_TYPES.join(', ')}`);
     if (typeof code !== 'string') throw bad('code must be a string');
-    const out = diagramSvg(type, code, { theme: themeOf(theme) });
+    const out = diagramSvg(type, code, { theme: themeOf(theme), background: !isTransparent(background, transparent) });
     if (!format || format === 'json') return out;
     if (!['svg', 'png', 'pdf'].includes(format)) throw bad('format must be json, svg, png, or pdf');
     const c = await convert(out.svg, out.width, out.height, format as ExportFormat, Number(scale) || undefined);
     res.type(c.mime).send(c.body);
   }));
   r.get('/syntax', wrap(() => ({ types: DIAGRAM_TYPES, reference: SYNTAX_REFERENCE, icons: ICON_NAMES, iconAliases: ICON_ALIASES })));
+
+  // ---- templates ----
+  r.get('/templates', wrap(() => TEMPLATES));
+  r.get('/templates/:templateId', wrap((req) => {
+    const t = templateById(String(req.params.templateId));
+    if (!t) throw notFound('Template not found');
+    return t;
+  }));
 
   r.get('/files/:id/export', wrap(async (req, res) => {
     const file = loadFile(req);
@@ -174,11 +187,17 @@ export function buildApi() {
       attach('devart.json');
       return void res.json({ format: 'devart', version: 1, title: file.title, doc: c.doc, elements: JSON.parse(c.canvas), map: c.map ? JSON.parse(c.map) : null });
     }
-    if (!['svg', 'png', 'pdf'].includes(format)) throw bad('format must be svg, png, pdf, md, or json');
+    if (!['svg', 'png', 'pdf', 'mermaid'].includes(format)) throw bad('format must be svg, png, pdf, mermaid, md, or json');
     const only = req.query.elementId as string | undefined;
     const els = JSON.parse(c.canvas) as CanvasElement[];
     if (only && !els.some((e) => e.id === only)) throw notFound('Element not found');
-    const out = canvasSvg(els, { only, theme: themeOf(req.query.theme), background: req.query.background !== '0' });
+    if (format === 'mermaid') {
+      const diagrams = els.filter((e) => e.type === 'diagram' && (!only || e.id === only));
+      if (!diagrams.length) throw bad(only ? 'That element is not a diagram' : 'This file has no diagrams');
+      attach('mmd');
+      return void res.type('text/plain').send(diagrams.map((e) => toMermaid(e.diagramType ?? 'architecture', e.code ?? '')).join('\n\n'));
+    }
+    const out = canvasSvg(els, { only, theme: themeOf(req.query.theme), background: !isTransparent(req.query.background, req.query.transparent) });
     const res2 = await convert(out.svg, out.width, out.height, format as ExportFormat, Number(req.query.scale) || undefined);
     attach(format);
     res.type(res2.mime).send(res2.body);

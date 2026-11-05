@@ -27,7 +27,7 @@ To work on the code, run `npm run dev:server` and `npm run dev:client` in two te
 
 | To | Do this |
 | --- | --- |
-| Add a component | Drag it from the left panel, or click it to place it in view |
+| Add a component | Drag it from the left panel onto the canvas |
 | Connect components | Choose **Connect** and drag from one to another, or drag the dot beside a selected component |
 | Rename | Double-click, or use the right panel, which also sets the description, icon, and colour |
 | Move or resize | Drag the component, or drag the square at its corner |
@@ -37,7 +37,9 @@ To work on the code, run `npm run dev:server` and `npm run dev:client` in two te
 | Zoom and pan | Ctrl+scroll or the zoom buttons to zoom. Drag empty canvas or scroll to pan |
 | Undo and redo | Ctrl+Z and Ctrl+Shift+Z, or the buttons at the top right |
 
-**Arrange automatically** in the right panel resets positions to the automatic layout. **Edit as code** shows the diagram's code, which stays in step with visual edits. Export gives you PNG, SVG, or PDF, and changes save as you work.
+**Arrange automatically** in the right panel resets positions to the automatic layout. **Edit as code** shows the diagram's code, which stays in step with visual edits. **Export** gives you PNG, SVG, or PDF at 1x, 2x, or 3x, with an option for a transparent background. Changes save as you work.
+
+The home page also lists **templates** to start from. See [Templates](#templates).
 
 ## Start it with one click (Windows)
 
@@ -81,7 +83,58 @@ Start a new Claude Code session, then ask it to draw your system in DevArt. Clau
 | Area | Tools |
 | --- | --- |
 | Draw | `get_diagram_syntax`, `validate_diagram`, `render_diagram`, `draw_architecture`, `update_diagram` |
+| Templates | `list_templates`, `draw_from_template` |
+| Mermaid | `import_mermaid`, `export_mermaid` |
 | Read | `list_files`, `list_diagrams`, `export_file` |
+
+- `export_file` takes `format` (`svg`, `png`, or `pdf`), and optionally `elementId` for one diagram, `theme`, `scale` (1 to 3), and `transparent`.
+- `draw_from_template` saves a copy of a template, given its `templateId` from `list_templates`, to a new file or to `fileId`. Claude can then adapt it with `update_diagram`.
+- `import_mermaid` takes Mermaid text and saves it as a new diagram, returning the converted DevArt code and an image. A flowchart becomes an architecture diagram, which you can edit visually, unless you pass `as: "flowchart"`.
+- `export_mermaid` takes a `fileId` and optional `diagramId`, and returns Mermaid text.
+
+## Export
+
+`GET /api/v1/files/:id/export` returns a whole file, or one diagram with `elementId`:
+
+| Query option | Values |
+| --- | --- |
+| `format` | `svg`, `png`, `pdf`, or `mermaid`. Also `json` and `md`; see [Removed features](#removed-features). |
+| `scale` | `1`, `2` (default), or `3`, for PNG and PDF. Values from 0.5 to 4 are accepted. |
+| `transparent` | `1` for no background fill. `background=0` does the same. |
+| `theme` | `light` (default) or `dark` |
+
+`POST /api/v1/render` renders diagram code without saving it. It takes `type`, `code`, `format` (`json`, `svg`, `png`, or `pdf`), `theme`, `scale`, and `transparent` in a JSON body.
+
+PDF pages keep the diagram's size, and `scale` sets the resolution of the image inside.
+
+## Mermaid
+
+DevArt converts to and from the common parts of [Mermaid](https://mermaid.js.org):
+
+| DevArt | Mermaid |
+| --- | --- |
+| Architecture and flow chart | `flowchart` or `graph`: node shapes, `subgraph`, link labels in both forms, `&` and chained links, dotted and thick links, `style`, `classDef`, and `:::class` fills and colours |
+| Sequence | `sequenceDiagram`: `participant` and `actor` with `as`, all arrow types, `+`/`-` activation, `activate`, `autonumber`, and `alt`/`else`, `opt`, `loop`, `par`/`and`, `break`, and `critical`/`option` blocks |
+| ERD | `erDiagram`: entities with typed attributes and `PK`, `FK`, and `UK` keys, all cardinalities, and labels |
+
+Export with `GET /api/v1/files/:id/export?format=mermaid&elementId=<diagram id>` or the `export_mermaid` MCP tool. Import with the `import_mermaid` MCP tool. In code, `toMermaid` is in `shared/mermaid.ts` and `fromMermaid` in `shared/fromMermaid.ts`.
+
+Converting is lossy in both directions. DevArt icons, colours, descriptions, and positions have no Mermaid form. Mermaid notes, `click` links, `linkStyle`, `rect` highlights, and other diagram types such as `classDiagram` and `gantt` are skipped. A Mermaid node keeps its label as its DevArt name, unless two nodes share a label.
+
+## Templates
+
+DevArt includes six diagrams to start from:
+
+| Id | Template | Type |
+| --- | --- | --- |
+| `microservices` | Microservices with API gateway | Architecture |
+| `cicd-pipeline` | CI/CD pipeline | Architecture |
+| `three-tier` | Three-tier web app | Architecture |
+| `event-driven` | Event-driven with queue | Architecture |
+| `oauth-flow` | OAuth 2.0 login flow | Sequence |
+| `blog-erd` | Blog database | ERD |
+
+Pick one under **Start from a template** on the home page, or use the `list_templates` and `draw_from_template` MCP tools. `GET /api/v1/templates` lists them with their code, and `GET /api/v1/templates/:id` returns one. They are defined in `shared/templates.ts`.
 
 ## Security
 
@@ -95,7 +148,7 @@ To run it on a network, put your own authentication in front of it, such as a re
 
 ## Removed features
 
-DevArt was simplified to focus on architecture diagrams. These are gone from the app: Draw with AI, documents, freehand drawing and shape tools, sticky notes, images, device frames, code blocks, comments, version history, presentation mode, share links, embeds, templates, style presets, custom icons, folders, the trash view, workspaces, API tokens, settings, audit logs, and importing from draw.io and Visio.
+DevArt was simplified to focus on architecture diagrams. These are gone from the app: Draw with AI, documents, freehand drawing and shape tools, sticky notes, images, device frames, code blocks, comments, version history, presentation mode, share links, embeds, the old templates gallery, style presets, custom icons, folders, the trash view, workspaces, API tokens, settings, audit logs, and importing from draw.io and Visio.
 
 **Your existing work is safe.** Older files stay in the list and open in the editor:
 
@@ -117,7 +170,7 @@ Back up the `data` directory. It contains the database with all diagrams.
 ## Tests
 
 ```bash
-npm test          # renderer, visual edits, REST API, live sync, and MCP over HTTP and stdio
+npm test          # renderer, visual edits, Mermaid, templates, REST API, live sync, and MCP over HTTP and stdio
 npm run e2e       # browser walkthrough; requires Chrome
 npm run typecheck
 ```
@@ -125,7 +178,7 @@ npm run typecheck
 ## Project layout
 
 ```
-shared/   diagram parser, SVG renderer, visual edits, icons (used by browser and server)
+shared/   diagram parser, SVG renderer, visual edits, icons, Mermaid conversion, templates (used by browser and server)
 server/   REST API, SQLite storage, live sync, and export
 mcp/      MCP tools with stdio and HTTP entry points
 client/   React web app: home and the editor

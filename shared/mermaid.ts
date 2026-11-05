@@ -1,4 +1,5 @@
-// Converts DevArt diagram code to Mermaid. Layout, icons, and colours have no Mermaid equivalent and are dropped.
+// Converts DevArt diagram code to Mermaid. Layout, icons, colours and style properties (border, fill, text) have
+// no Mermaid equivalent and are dropped; only `shape` carries over.
 import { parseDiagram, type GraphEdge, type SeqItem } from './dsl.ts';
 import type { DiagramType } from './types.ts';
 
@@ -12,7 +13,8 @@ function node(id: string, label: string, shape?: string, kind?: string) {
   if (kind === 'gateway') return `${id}{${l}}`;
   switch (shape) {
     case 'rounded': return `${id}(${l})`;
-    case 'oval': return `${id}([${l}])`;
+    case 'oval': case 'ellipse': return `${id}([${l}])`;
+    case 'circle': return `${id}((${l}))`;
     case 'diamond': return `${id}{${l}}`;
     case 'cylinder': return `${id}[(${l})]`;
     case 'hexagon': return `${id}{{${l}}}`;

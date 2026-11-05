@@ -2,6 +2,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { del, post, timeAgo, toast, toastError, toggleTheme, useLoad, useTheme } from '../api.ts';
 import { Icon, Logo } from '../components/ui.tsx';
 import { InstallButton } from '../pwa.tsx';
+import { TemplatePicker } from '../components/TemplatePicker.tsx';
 
 interface FileRow { id: string; title: string; updatedAt: number }
 
@@ -50,6 +51,7 @@ export function HomePage() {
             </div>
           </section>
         )}
+        <TemplatePicker />
       </main>
     </div>
   );

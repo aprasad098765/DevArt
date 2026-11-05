@@ -1,5 +1,5 @@
 // Diagram-as-code parser. One line-oriented grammar with a mode for each diagram type.
-import type { DiagramIssue, DiagramType } from './types.ts';
+import { BORDER_STYLES, BORDER_WIDTHS, NODE_SHAPES, TEXT_ALIGNS, TEXT_VALIGNS, type DiagramIssue, type DiagramType } from './types.ts';
 
 export type Props = Record<string, string>;
 
@@ -27,7 +27,8 @@ export interface ParsedDiagram {
 }
 
 const DIRECTIVES = new Set(['title', 'direction', 'colorMode', 'styleMode', 'typeface', 'autoNumber']);
-export const CONNECTION_PROPS = new Set(['color', 'style', 'width', 'wrap']);
+// routing: elbow (default) | straight | curved   head: arrow (default) | open | diamond | none
+export const CONNECTION_PROPS = new Set(['color', 'style', 'width', 'wrap', 'routing', 'head']);
 const SEQ_BLOCKS = new Set(['alt', 'opt', 'loop', 'par', 'break', 'else', 'and']);
 
 function unquote(s: string) {
@@ -331,7 +332,31 @@ export function parseDiagram(type: DiagramType, code: string): ParsedDiagram {
       if (!n.isGroup && n.props.type && !allowed.has(n.props.type)) err(n.line, `Unknown BPMN type "${n.props.type}"`, 'warning');
     }
   }
+  if (type === 'architecture' || type === 'flowchart') for (const n of d.nodes) styleIssues(n, err);
   return d;
+}
+
+const isNum = (v: string) => v.trim() !== '' && Number.isFinite(Number(v));
+const oneOf = (list: readonly string[]) => (v: string) => list.includes(v);
+/** Checks for each node style property; a failing value is ignored by the renderer and reported as a warning. */
+const STYLE_CHECKS: Record<string, [ok: (v: string) => boolean, hint: string]> = {
+  shape: [oneOf(NODE_SHAPES), NODE_SHAPES.join(', ')],
+  border: [(v) => Object.hasOwn(BORDER_WIDTHS, v) || isNum(v), `${Object.keys(BORDER_WIDTHS).join(', ')}, or a number`],
+  borderStyle: [oneOf(BORDER_STYLES), BORDER_STYLES.join(', ')],
+  align: [oneOf(TEXT_ALIGNS), TEXT_ALIGNS.join(', ')],
+  valign: [oneOf(TEXT_VALIGNS), TEXT_VALIGNS.join(', ')],
+  radius: [isNum, 'a number'],
+  fontSize: [isNum, 'a number'],
+  opacity: [(v) => /^\d*\.?\d+%?$/.test(v.trim()), 'a number from 0 to 1, or a percentage'],
+  bold: [oneOf(['true', 'false']), 'true or false'],
+  italic: [oneOf(['true', 'false']), 'true or false'],
+};
+
+function styleIssues(n: GraphNode, err: (line: number, message: string, severity: 'warning') => void) {
+  for (const [key, [ok, hint]] of Object.entries(STYLE_CHECKS)) {
+    const v = n.props[key];
+    if (v !== undefined && !ok(v)) err(n.line, `Unknown ${key} "${v}" on "${n.id}". Use ${hint}`, 'warning');
+  }
 }
 
 export const SYNTAX_REFERENCE: Record<DiagramType, string> = {
@@ -350,8 +375,15 @@ AWS [icon: cloud, color: orange] {
 Client > API: HTTPS
 API > Orders
 Orders <> DB [color: green]: SQL
+Cache [shape: cylinder, fill: "#fef3c7", border: thick, borderStyle: dashed, textColor: "#92400e", bold: true]
+Orders > Cache [style: dashed]
 // Operators: > < <> - -- -->   Fan-out: A > B, C   Chains: A > B > C
-// Node properties: icon, color, label, link`,
+// Node properties: icon, color, label, description, link, w, h, plus the style properties below
+// Style: shape: rect | rounded | circle | oval | diamond | hexagon | cylinder | parallelogram | triangle | document | cloud
+//   border: none | thin | medium | thick | <px>   borderStyle: solid | dashed | dotted   borderColor: <colour>   radius: <px>
+//   fill: <colour> | none   opacity: 0-1 or 50%   textColor: <colour>   fontSize: <px>   bold: true   italic: true
+//   align: left | center | right   valign: top | middle | bottom
+// Colours: blue, green, red, orange, purple, yellow, pink, gray, teal, black, white, or hex like "#ff0000"`,
   flowchart: `// Flow chart
 direction down
 Start [shape: oval, color: green]
@@ -362,8 +394,13 @@ Stop [shape: oval, color: red]
 Start > Valid?
 Valid? > Save: yes
 Valid? > Stop: no
+Retry [shape: circle, border: medium, borderStyle: dotted, fontSize: 12, italic: true]
 Save > Report > Stop
-// Shapes: rect, rounded, oval, diamond, cylinder, hexagon, parallelogram, triangle, document, cloud`,
+Valid? > Retry: maybe
+// Shapes: rect, rounded, circle, oval, diamond, cylinder, hexagon, parallelogram, triangle, document, cloud
+// Style: border: none | thin | medium | thick | <px>   borderStyle: solid | dashed | dotted   borderColor: <colour>   radius: <px>
+//   fill: <colour> | none   opacity: 0-1 or 50%   textColor: <colour>   fontSize: <px>   bold: true   italic: true
+//   align: left | center | right   valign: top | middle | bottom   Colours: named (blue, red, ...) or hex like "#ff0000"`,
   erd: `// Entity relationship diagram
 users [icon: user, color: blue] {
   id uuid pk

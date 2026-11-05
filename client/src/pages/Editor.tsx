@@ -3,10 +3,11 @@ import { Link, useParams } from 'react-router-dom';
 import * as Y from 'yjs';
 import { WebsocketProvider } from 'y-websocket';
 import { IndexeddbPersistence } from 'y-indexeddb';
-import { download, patch, toastError, toggleTheme, useLoad, useTheme } from '../api.ts';
+import { patch, toastError, toggleTheme, useLoad, useTheme } from '../api.ts';
 import { Canvas, removeElements } from '../components/Canvas.tsx';
 import { DiagramPanel } from '../components/DiagramPanel.tsx';
-import { Icon, Menu } from '../components/ui.tsx';
+import { Icon } from '../components/ui.tsx';
+import { ExportMenu } from '../components/ExportMenu.tsx';
 import type { CanvasElement, DiagramSelection } from '../../../shared/types.ts';
 
 function useCollab(fileId: string | undefined) {
@@ -81,11 +82,21 @@ function Editor({ fileId }: { fileId: string }) {
     return () => yEls.unobserve(on);
   }, [collab.doc]);
 
+  // Hide UI (Mod+\): the palette, properties panel and zoom bar step aside. Mod+\ again or Esc brings them back.
+  const [uiHidden, setUiHidden] = useState(false);
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && e.code === 'Backslash') { e.preventDefault(); setUiHidden((h) => !h); return; }
+      if (e.key === 'Escape' && uiHidden && !(e.target as HTMLElement | null)?.closest?.('input, textarea, select, .cm-editor')) setUiHidden(false);
+    };
+    window.addEventListener('keydown', key);
+    return () => window.removeEventListener('keydown', key);
+  }, [uiHidden]);
+
   const saveTitle = () => {
     if (!file || !title.trim() || title === file.title) return;
     patch(`/files/${fileId}`, { title }).then(reload).catch(toastError);
   };
-  const exportAs = (format: string) => download(`/api/v1/files/${fileId}/export?format=${format}&theme=${theme}`, `${title}.${format}`);
 
   if (error && offline) return <div className="center"><div><h2>This diagram isn't available offline</h2><p className="muted">Diagrams you've opened before work without the server. This one will open once the server is back.</p><Link to="/">Back to home</Link></div></div>;
   if (error) return <div className="center"><div><h2>Diagram not found</h2><p className="muted">It may have been deleted.</p><Link to="/">Back to home</Link></div></div>;
@@ -103,19 +114,16 @@ function Editor({ fileId }: { fileId: string }) {
         <span className={`save-state ${collab.status === 'connected' ? 'muted' : 'warn'}`} role="status">{STATUS_TEXT[collab.status]}</span>
         <div className="grow" />
         <button className="ghost" aria-label="Switch theme" onClick={toggleTheme}><Icon name={theme === 'dark' ? 'sun' : 'moon'} /></button>
-        <Menu label="Export" trigger={<><Icon name="download" /> Export</>} items={[
-          { label: 'PNG image', onClick: () => exportAs('png') },
-          { label: 'SVG vector', onClick: () => exportAs('svg') },
-          { label: 'PDF', onClick: () => exportAs('pdf') },
-        ]} />
+        <ExportMenu fileId={fileId!} title={title} theme={theme} />
       </header>
       <div className="editor-body">
         <Canvas
           doc={collab.doc} theme={theme} synced={collab.synced} selected={selected} onSelect={setSelected}
           diagramSelection={part} onDiagramSelection={setPart}
+          uiHidden={uiHidden} onToggleUi={() => setUiHidden((h) => !h)}
         />
-        {diagram && <DiagramPanel doc={collab.doc} element={diagram} canDelete={elements.length > 1} selection={part} onSelection={setPart} />}
-        {selectedEl && selectedEl.type !== 'diagram' && (
+        {!uiHidden && diagram && <DiagramPanel doc={collab.doc} element={diagram} canDelete={elements.length > 1} selection={part} onSelection={setPart} />}
+        {!uiHidden && selectedEl && selectedEl.type !== 'diagram' && (
           <aside className="dpanel" aria-label="Properties">
             <div className="visual">
               <p className="muted small">This shape was made with an earlier version of DevArt. You can move, resize, and retype it on the canvas.</p>

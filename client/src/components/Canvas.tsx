@@ -7,8 +7,16 @@ import type { CanvasElement, DiagramSelection, DiagramType, Point, Theme } from 
 import { applyVisualEdit } from './DiagramPanel.tsx';
 import { toast } from '../api.ts';
 import { Icon } from './ui.tsx';
+import { ZoomMenu } from './ZoomMenu.tsx';
+import { Minimap } from './Minimap.tsx';
+import { AlignBar } from './AlignBar.tsx';
+import { alignDeltas, distributeDeltas, guidesFor, snapToGuides, unionBox, type AlignMode, type Box, type Guide } from '../../../shared/align.ts';
+import { ShortcutsHelp } from './ShortcutsHelp.tsx';
+import { StyleBar } from './StyleBar.tsx';
+import { registerUndo } from './controls.tsx';
 
-type Tool = 'select' | 'move' | 'connect';
+/** 'shape' means a shape is armed: the next click on the canvas places it. */
+type Tool = 'select' | 'move' | 'connect' | 'shape';
 interface View { x: number; y: number; k: number }
 
 const COMPONENTS: { name: string; icon: string }[] = [
@@ -18,6 +26,22 @@ const COMPONENTS: { name: string; icon: string }[] = [
   { name: 'LLM', icon: 'cpu' }, { name: 'Cloud', icon: 'cloud' },
 ];
 const GROUP = 'Group';
+const CATEGORIES: [string, string[]][] = [
+  ['Clients', ['Client', 'User']],
+  ['Compute', ['Service', 'API Gateway', 'Load Balancer', 'Function', 'Container', 'LLM']],
+  ['Data', ['Database', 'Vector DB', 'Cache', 'Storage']],
+  ['Messaging & network', ['Queue', 'Cloud']],
+];
+type ShapeName = 'rect' | 'rounded' | 'circle' | 'diamond' | 'hexagon' | 'cylinder' | 'parallelogram' | 'triangle' | 'document' | 'cloud';
+interface ShapeSpec { shape: ShapeName; label: string; key?: string }
+const SHAPES: ShapeSpec[] = [
+  { shape: 'rect', label: 'Rectangle', key: 'R' }, { shape: 'rounded', label: 'Rounded' }, { shape: 'circle', label: 'Circle', key: 'O' },
+  { shape: 'diamond', label: 'Diamond', key: 'D' }, { shape: 'hexagon', label: 'Hexagon', key: 'H' }, { shape: 'cylinder', label: 'Cylinder', key: 'Y' },
+  { shape: 'parallelogram', label: 'Parallelogram' }, { shape: 'triangle', label: 'Triangle' }, { shape: 'document', label: 'Document' }, { shape: 'cloud', label: 'Cloud' },
+];
+/** Shapes travel through drag-and-drop and addComponent as `shape:<name>`, next to component names. */
+const SHAPE_PREFIX = 'shape:';
+const shapeOf = (name: string) => (name.startsWith(SHAPE_PREFIX) ? SHAPES.find((s) => s.shape === name.slice(SHAPE_PREFIX.length)) : undefined);
 const DRAG_TYPE = 'application/x-devart-component';
 const HANDLES = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'] as const;
 type Handle = typeof HANDLES[number];
@@ -48,12 +72,17 @@ interface Props {
   onSelect: (id: string | null) => void;
   diagramSelection: DiagramSelection | null;
   onDiagramSelection: (s: DiagramSelection | null) => void;
+  /** Hide UI: the tool rail, library, zoom bar and minimap step aside for a clean view. */
+  uiHidden?: boolean;
+  onToggleUi?: () => void;
 }
 
 export function Canvas(p: Props) {
   const yEls = useMemo(() => p.doc.getMap<CanvasElement>('elements'), [p.doc]);
   const undo = useMemo(() => new Y.UndoManager(yEls), [yEls]);
   useEffect(() => () => undo.destroy(), [undo]);
+  // Lets the properties panel make each style edit its own undo step.
+  useEffect(() => registerUndo(p.doc, undo), [p.doc, undo]);
   const [els, setEls] = useState<CanvasElement[]>(() => [...yEls.values()]);
   useEffect(() => {
     const on = () => setEls([...yEls.values()]);
@@ -72,6 +101,27 @@ export function Canvas(p: Props) {
   const [spaceHeld, setSpaceHeld] = useState(false);
   // Holding Space switches to the Move tool until it is released.
   const activeTool: Tool = spaceHeld ? 'move' : tool;
+  const [armed, setArmed] = useState<ShapeName | null>(null);
+  const armedShape = activeTool === 'shape' ? SHAPES.find((s) => s.shape === armed) : undefined;
+  // The Insert popover opens over the canvas, and closes again after an item is picked or dragged out.
+  const [insertOpen, setInsertOpen] = useState(false);
+  const [insertView, setInsertView] = useState<'root' | 'components' | 'shapes'>('root');
+  const [insertQuery, setInsertQuery] = useState('');
+  const [insertDrag, setInsertDrag] = useState(false);
+  const closeInsert = () => { setInsertOpen(false); setInsertView('root'); setInsertQuery(''); setInsertDrag(false); };
+  const toggleInsert = () => { if (insertOpen) closeInsert(); else setInsertOpen(true); };
+  useEffect(() => {
+    if (!insertOpen) return;
+    const away = (e: PointerEvent) => { if (!(e.target as Element).closest('.insert-pop, .insert-toggle')) closeInsert(); };
+    window.addEventListener('pointerdown', away);
+    return () => window.removeEventListener('pointerdown', away);
+  }, [insertOpen]);
+  const q = insertQuery.trim().toLowerCase();
+  const insertComponents = COMPONENTS.filter((c) => !q || c.name.toLowerCase().includes(q));
+  const insertShapes = SHAPES.filter((x) => !q || x.label.toLowerCase().includes(q));
+  const insertGroup = !q || 'group'.includes(q);
+  const armShape = (s: ShapeName) => { setArmed(s); setTool('shape'); };
+  const [helpOpen, setHelpOpen] = useState(false);
   const [selection, setSelection] = useState<Set<string>>(new Set());
   const [editing, setEditing] = useState<string | null>(null);
   const [partBox, setPartBox] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
@@ -80,6 +130,19 @@ export function Canvas(p: Props) {
   const [connecting, setConnecting] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
   const spaceDown = useRef(false);
   const fitted = useRef(false);
+  // ---- view and arrangement extras: minimap, smart guides, several selected nodes ----
+  const [minimap, setMinimap] = useState(false);
+  const [guides, setGuides] = useState<Guide[]>([]);
+  /** Nodes selected alongside the primary diagram selection, with Shift+click. Always includes the primary node. */
+  const [multi, setMulti] = useState<{ diagramId: string; ids: string[] } | null>(null);
+  const [size, setSize] = useState({ w: 0, h: 0 });
+  useEffect(() => {
+    const el = host.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => setSize({ w: el.clientWidth, h: el.clientHeight }));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   // With one diagram on the canvas, the diagram is the canvas: only its parts are picked and moved.
   const onlyDiagram = els.length === 1 && els[0].type === 'diagram';
@@ -117,6 +180,20 @@ export function Canvas(p: Props) {
       const ox = (cx ?? r.left + r.width / 2) - r.left, oy = (cy ?? r.top + r.height / 2) - r.top;
       return { k, x: ox - ((ox - v.x) / v.k) * k, y: oy - ((oy - v.y) / v.k) * k };
     });
+  }, []);
+  /** Zooms around the middle of the view to an exact scale. */
+  const zoomTo = useCallback((k: number) => zoomAt(k / viewRef.current.k), [zoomAt]);
+  /** Fits a canvas box in the view, with a margin, never zooming in past 200%. */
+  const zoomToBox = useCallback((b: Box) => {
+    const r = host.current?.getBoundingClientRect();
+    if (!r || !r.width) return;
+    const k = Math.min(2, Math.max(0.1, Math.min((r.width - 160) / (b.w || 1), (r.height - 160) / (b.h || 1))));
+    setView({ x: (r.width - b.w * k) / 2 - b.x * k, y: (r.height - b.h * k) / 2 - b.y * k, k });
+  }, []);
+  /** Puts a canvas point in the middle of the view. */
+  const centerOn = useCallback((x: number, y: number) => {
+    const r = host.current?.getBoundingClientRect();
+    if (r) setView((v) => ({ ...v, x: r.width / 2 - x * v.k, y: r.height / 2 - y * v.k }));
   }, []);
 
   useEffect(() => {
@@ -176,6 +253,15 @@ export function Canvas(p: Props) {
     }
     return best;
   };
+  /** The given nodes minus any inside another given group, which would otherwise move twice. */
+  const topLevelNodes = (d: ReturnType<typeof parseDiagram>, ids: string[]) => {
+    const set = new Set(ids.filter((id) => d.nodes.some((n) => n.id === id)));
+    const inSet = (id: string) => {
+      for (let a = d.nodes.find((n) => n.id === id)?.parent; a; a = d.nodes.find((n) => n.id === a)?.parent) if (set.has(a)) return true;
+      return false;
+    };
+    return [...set].filter((id) => !inSet(id));
+  };
 
   // ---- adding components ----
   const targetDiagram = () => {
@@ -197,8 +283,10 @@ export function Canvas(p: Props) {
     open.sort((p, q) => Math.hypot(p.x - home.x, p.y - home.y) - Math.hypot(q.x - home.x, q.y - home.y));
     return open[0] ?? home;
   };
+  /** `name` is a component name, GROUP, or `shape:<name>` for a plain shape. */
   const addComponent = (name: string, at?: Point) => {
     const spec = COMPONENTS.find((c) => c.name === name);
+    const shape = shapeOf(name);
     undo.stopCapturing();
     let added = '', diagramId = '';
     p.doc.transact(() => {
@@ -214,7 +302,9 @@ export function Canvas(p: Props) {
       const parent = at ? groupAt(el, spot) : p.diagramSelection?.kind === 'node' && parseDiagram(type, el.code ?? '').nodes.find((n) => n.id === p.diagramSelection!.id && n.isGroup)?.id;
       const r = name === GROUP
         ? addNode(type, el.code ?? '', 'Group', { group: true, parent: parent || undefined })
-        : addNode(type, el.code ?? '', spec?.name ?? name, { parent: parent || undefined, props: spec ? { icon: spec.icon } : {} });
+        : shape
+          ? addNode(type, el.code ?? '', shape.label, { parent: parent || undefined, props: { shape: shape.shape } })
+          : addNode(type, el.code ?? '', spec?.name ?? name, { parent: parent || undefined, props: spec ? { icon: spec.icon } : {} });
       applyVisualEdit(p.doc, el.id, r.code, { id: r.id, ...spot });
       added = r.id;
       diagramId = el.id;
@@ -256,6 +346,13 @@ export function Canvas(p: Props) {
     // The move tool only drags the view: it never selects or edits anything.
     if (activeTool === 'move') return startPan(e);
     const pt = toWorld(e.clientX, e.clientY);
+    // An armed shape is placed with its middle under the pointer, like a drop, then the tool goes back to Select.
+    if (activeTool === 'shape') {
+      e.preventDefault();
+      if (armedShape) addComponent(SHAPE_PREFIX + armedShape.shape, { x: pt.x - 48, y: pt.y - 38 });
+      setTool('select');
+      return;
+    }
     const target = e.target as Element;
     const id = target.closest('[data-id]')?.getAttribute('data-id') ?? null;
     const el = id ? yEls.get(id) : undefined;
@@ -269,9 +366,26 @@ export function Canvas(p: Props) {
       return;
     }
     if (visual && nodeId) {
-      select([el!.id]);
-      p.onDiagramSelection({ diagramId: el!.id, kind: 'node', id: nodeId });
-      if (DRAGGABLE_TYPES.includes(el!.diagramType ?? 'architecture')) startNodeDrag(e, el!.id, nodeId, pt);
+      const diagramId = el!.id;
+      const draggable = DRAGGABLE_TYPES.includes(el!.diagramType ?? 'architecture');
+      const current = sel?.kind === 'node' && sel.diagramId === diagramId ? selNodes : [];
+      // Shift+click adds a node to, or takes it out of, the nodes selected in this diagram.
+      if (e.shiftKey && draggable && current.length) {
+        const set = new Set(current);
+        if (set.has(nodeId)) set.delete(nodeId); else set.add(nodeId);
+        const ids = [...set];
+        if (!ids.length) { setMulti(null); p.onDiagramSelection(null); return; }
+        setMulti({ diagramId, ids });
+        p.onDiagramSelection({ diagramId, kind: 'node', id: set.has(nodeId) ? nodeId : ids[ids.length - 1] });
+        if (set.has(nodeId)) startNodeDrag(e, diagramId, nodeId, pt, ids);
+        return;
+      }
+      // Pressing on one of several selected nodes drags them all; a click without a drag selects just that one.
+      const keep = draggable && current.length > 1 && current.includes(nodeId);
+      select([diagramId]);
+      setMulti(keep ? { diagramId, ids: current } : null);
+      p.onDiagramSelection({ diagramId, kind: 'node', id: nodeId });
+      if (draggable) startNodeDrag(e, diagramId, nodeId, pt, keep ? current : [nodeId], keep ? () => setMulti(null) : undefined);
       return;
     }
     if (visual && edgeId != null) {
@@ -287,16 +401,30 @@ export function Canvas(p: Props) {
     startElementDrag(e, el, pt);
   };
 
-  /** Drags a node. Dropping it on a group moves it in; dropping it clear of its group moves it out. */
-  const startNodeDrag = (e: React.PointerEvent, id: string, nodeId: string, start: Point) => {
+  /**
+   * Drags a node, or several selected nodes together (`group`). Dropping a single node on a group moves it in;
+   * dropping it clear of its group moves it out. The dragged node snaps to other nodes' edges and centres
+   * (hold Alt to skip), and `onClick` runs when the pointer is released without dragging.
+   */
+  const startNodeDrag = (e: React.PointerEvent, id: string, nodeId: string, start: Point, group: string[] = [nodeId], onClick?: () => void) => {
     const el0 = yEls.get(id)!;
     const type = el0.diagramType ?? 'architecture';
     const scale = scaleOf(el0);
-    const base = el0.nodeOffsets?.[nodeId] ?? { x: 0, y: 0 };
     const d0 = parseDiagram(type, el0.code ?? '');
     const node0 = d0.nodes.find((n) => n.id === nodeId);
     const boxes0 = boxesOf(el0);
     const parentBox = node0?.parent ? boxes0.get(node0.parent) : undefined;
+    const movers = topLevelNodes(d0, group);
+    const bases = new Map(movers.map((n) => [n, el0.nodeOffsets?.[n] ?? { x: 0, y: 0 }]));
+    // Snap targets: nodes that stay put. Groups around the moving nodes re-fit as they move, so they're left out.
+    const parentOf = (n: string) => d0.nodes.find((k) => k.id === n)?.parent;
+    const skip = new Set<string>();
+    for (const m of movers) {
+      for (let a = parentOf(m); a; a = parentOf(a)) skip.add(a);
+      for (const k of d0.nodes) for (let a: string | undefined = k.id; a; a = parentOf(a)) if (a === m) { skip.add(k.id); break; }
+    }
+    const others = [...boxes0].filter(([k]) => !skip.has(k)).map(([, b]) => b);
+    const lead = boxes0.get(nodeId);
     let moved = false;
     beginDrag(e, (ev) => {
       const q = toWorld(ev.clientX, ev.clientY);
@@ -304,10 +432,21 @@ export function Canvas(p: Props) {
       if (!cur) return;
       if (!moved && Math.hypot(q.x - start.x, q.y - start.y) < 3) return;
       moved = true;
-      const offsets = { ...cur.nodeOffsets, [nodeId]: { x: base.x + snapV(q.x - start.x) / scale, y: base.y + snapV(q.y - start.y) / scale } };
+      const rx = q.x - start.x, ry = q.y - start.y;
+      let dx = snapV(rx), dy = snapV(ry);
+      if (lead && !ev.altKey) {
+        const s = snapToGuides({ ...lead, x: lead.x + rx, y: lead.y + ry }, others, 6 / viewRef.current.k);
+        if (s.dx !== undefined) dx = rx + s.dx;
+        if (s.dy !== undefined) dy = ry + s.dy;
+        setGuides(guidesFor({ ...lead, x: lead.x + dx, y: lead.y + dy }, others));
+      }
+      const offsets = { ...cur.nodeOffsets };
+      for (const [n, b] of bases) offsets[n] = { x: b.x + dx / scale, y: b.y + dy / scale };
       yEls.set(id, { ...cur, ...withOffsets(cur, cur.code ?? '', offsets) });
     }, (ev) => {
-      if (!moved || !node0 || node0.isGroup) return;
+      setGuides([]);
+      if (!moved) onClick?.();
+      if (!moved || !node0 || node0.isGroup || movers.length > 1) return;
       const cur = yEls.get(id);
       if (!cur) return;
       const q = toWorld(ev.clientX, ev.clientY);
@@ -455,22 +594,47 @@ export function Canvas(p: Props) {
     removeElements(p.doc, ids);
     select([]);
   };
+  /** View and arrangement shortcuts. Returns true when it handled the key. Mod+\ (Hide UI) lives in the editor page. */
+  const viewKey = (e: React.KeyboardEvent) => {
+    const mod = e.ctrlKey || e.metaKey;
+    // e.code, because Shift and Alt change e.key (Shift+1 is "!", and Alt+0 is "º" on a Mac).
+    if (e.shiftKey && !mod && !e.altKey && e.code === 'Digit1') { fit(); return true; }
+    if (e.shiftKey && !mod && !e.altKey && e.code === 'Digit2') { zoomToSelection(); return true; }
+    if (mod && e.altKey && !e.shiftKey && e.code === 'Digit0') { zoomTo(1); return true; }
+    if (mod && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'd') { duplicateNodes(); return true; }
+    const dir = ({ ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] } as Record<string, [number, number]>)[e.key];
+    if (dir && !mod && !e.altKey) {
+      const step = e.shiftKey ? 32 : SNAP;
+      return nudge(dir[0] * step, dir[1] * step);
+    }
+    return false;
+  };
   const onKeyDown = (e: React.KeyboardEvent) => {
     if ((e.target as HTMLElement).closest('input, textarea, select, .cm-editor')) return;
     const mod = e.ctrlKey || e.metaKey;
     if (e.code === 'Space') return; // handled on window, so it works without canvas focus
+    if (viewKey(e)) { e.preventDefault(); return; }
     if (mod && e.key === '0') { e.preventDefault(); fit(); return; }
     if (mod && (e.key === '=' || e.key === '+')) { e.preventDefault(); zoomAt(1.2); return; }
     if (mod && e.key === '-') { e.preventDefault(); zoomAt(1 / 1.2); return; }
     if (mod && e.key.toLowerCase() === 'z') { e.preventDefault(); if (e.shiftKey) undo.redo(); else undo.undo(); return; }
     if (mod && e.key.toLowerCase() === 'y') { e.preventDefault(); undo.redo(); return; }
     if (e.key === 'Delete' || e.key === 'Backspace') { if (sel) deleteSelectedPart(); else removeSelected(); return; }
+    if (e.key === 'Escape' && insertOpen) { closeInsert(); return; }
+    if (e.key === '/' && !mod && !e.altKey) { e.preventDefault(); toggleInsert(); return; }
     if (e.key === 'Escape') { if (tool !== 'select') setTool('select'); else if (sel) p.onDiagramSelection(null); else select([]); return; }
     if (sel?.kind === 'node' && e.key === 'Enter') { e.preventDefault(); setRenaming(true); return; }
     if (e.key === 'Enter' && selection.size === 1) { const id = [...selection][0]; if (TEXT_TYPES.includes(yEls.get(id)?.type ?? '')) { e.preventDefault(); setEditing(id); } return; }
     if (!mod && e.key.toLowerCase() === 'v') setTool('select');
     if (!mod && e.key.toLowerCase() === 'm') setTool('move');
     if (!mod && e.key.toLowerCase() === 'c') setTool('connect');
+    if (!mod && !e.altKey && e.key === '?') { e.preventDefault(); setHelpOpen(true); return; }
+    if (!mod && !e.altKey && (e.key === '+' || e.key === '=')) { e.preventDefault(); zoomAt(1.2); return; }
+    if (!mod && !e.altKey && e.key === '-') { e.preventDefault(); zoomAt(1 / 1.2); return; }
+    if (!mod && !e.altKey && !e.shiftKey) {
+      const s = SHAPES.find((k) => k.key?.toLowerCase() === e.key.toLowerCase());
+      if (s) { e.preventDefault(); armShape(s.shape); }
+    }
   };
   useEffect(() => {
     const release = () => { spaceDown.current = false; setSpaceHeld(false); };
@@ -519,9 +683,122 @@ export function Canvas(p: Props) {
   const deleteSelectedPart = () => {
     if (!sel) return;
     if (sel.kind === 'edge') changeDiagramCode(sel.diagramId, (t, c) => removeEdge(t, c, Number(sel.id)));
-    else changeDiagramCode(sel.diagramId, (t, c) => removeNode(t, c, sel.id));
+    else changeDiagramCode(sel.diagramId, (t, c) => selNodes.reduce((code, n) => removeNode(t, code, n), c));
     p.onDiagramSelection(null);
   };
+
+  // ---- several selected nodes: align, distribute, nudge, duplicate ----
+  /** Nodes selected in the current diagram: the primary selection plus any added with Shift+click. */
+  const selNodes = useMemo(() => {
+    if (sel?.kind !== 'node') return [];
+    const extra = multi?.diagramId === sel.diagramId ? multi.ids : [];
+    return [...new Set([...extra, sel.id])];
+  }, [sel, multi]);
+  // Selecting anything else from outside (the panel, Esc, undo) drops the extra nodes.
+  useEffect(() => {
+    if (multi && (sel?.kind !== 'node' || sel.diagramId !== multi.diagramId || !multi.ids.includes(sel.id))) setMulti(null);
+  }, [sel, multi]);
+  const multiEl = selNodes.length > 1 && sel ? byId.get(sel.diagramId) : undefined;
+  const multiBoxes = useMemo(() => {
+    if (!multiEl) return null;
+    const all = boxesOf(multiEl);
+    const d = parseDiagram(multiEl.diagramType ?? 'architecture', multiEl.code ?? '');
+    return new Map(topLevelNodes(d, selNodes).flatMap((n) => (all.has(n) ? [[n, all.get(n)!] as const] : [])));
+  }, [multiEl, selNodes]);
+
+  /** Moves nodes by canvas distances, as one undo step. */
+  const shiftNodes = (diagramId: string, deltas: Map<string, Point>) => {
+    const cur = yEls.get(diagramId);
+    if (!cur || !DRAGGABLE_TYPES.includes(cur.diagramType ?? 'architecture')) return false;
+    const scale = scaleOf(cur);
+    const offsets = { ...cur.nodeOffsets };
+    const r = (v: number) => Math.round(v * 100) / 100;
+    for (const [n, d] of deltas) {
+      const o = offsets[n] ?? { x: 0, y: 0 };
+      offsets[n] = { x: r(o.x + d.x / scale), y: r(o.y + d.y / scale) };
+    }
+    undo.stopCapturing();
+    yEls.set(diagramId, { ...cur, ...withOffsets(cur, cur.code ?? '', offsets) });
+    undo.stopCapturing();
+    return true;
+  };
+  const alignNodes = (mode: AlignMode) => { if (sel && multiBoxes) shiftNodes(sel.diagramId, alignDeltas(multiBoxes, mode)); };
+  const distributeNodes = (axis: 'x' | 'y') => { if (sel && multiBoxes) shiftNodes(sel.diagramId, distributeDeltas(multiBoxes, axis)); };
+
+  /** Arrow keys: moves the selected nodes, or the selected elements when no node is selected. */
+  const nudge = (dx: number, dy: number) => {
+    if (sel?.kind === 'node') {
+      const el = yEls.get(sel.diagramId);
+      if (!el) return false;
+      const d = parseDiagram(el.diagramType ?? 'architecture', el.code ?? '');
+      return shiftNodes(sel.diagramId, new Map(topLevelNodes(d, selNodes).map((n) => [n, { x: dx, y: dy }])));
+    }
+    const ids = [...withDependents(selection)].filter((id) => { const k = yEls.get(id); return k && !k.locked && !(onlyDiagram && k.type === 'diagram'); });
+    if (!ids.length || sel) return false;
+    undo.stopCapturing();
+    p.doc.transact(() => { for (const id of ids) { const k = yEls.get(id)!; update(id, { x: k.x + dx, y: k.y + dy }); } });
+    undo.stopCapturing();
+    return true;
+  };
+
+  /** Mod+D: copies the selected components (not groups) next to the originals and selects the copies. */
+  const duplicateNodes = () => {
+    if (sel?.kind !== 'node') return;
+    const el0 = yEls.get(sel.diagramId);
+    if (!el0 || !DRAGGABLE_TYPES.includes(el0.diagramType ?? 'architecture')) return;
+    const type = el0.diagramType ?? 'architecture';
+    const nodes = parseDiagram(type, el0.code ?? '').nodes.filter((n) => selNodes.includes(n.id) && !n.isGroup);
+    if (!nodes.length) { toast('Groups can’t be duplicated yet. Select a component inside one instead.', true); return; }
+    const boxes = boxesOf(el0);
+    const added: string[] = [];
+    undo.stopCapturing();
+    p.doc.transact(() => {
+      for (const n of nodes) {
+        const cur = yEls.get(sel.diagramId)!;
+        const b = boxes.get(n.id);
+        // The copy keeps the original's look and name; its id gets a number so it stays distinct.
+        const r = addNode(type, cur.code ?? '', n.id, { parent: n.parent, props: { ...n.props, label: n.props.label ?? n.id } });
+        applyVisualEdit(p.doc, sel.diagramId, r.code, b ? { id: r.id, x: b.x + 24, y: b.y + 24 } : undefined);
+        added.push(r.id);
+      }
+    });
+    undo.stopCapturing();
+    setMulti(added.length > 1 ? { diagramId: sel.diagramId, ids: added } : null);
+    p.onDiagramSelection({ diagramId: sel.diagramId, kind: 'node', id: added[added.length - 1] });
+  };
+
+  /** Shift+2: frames the selected part(s), or the selected elements. */
+  const selectionBox = (): Box | null => {
+    if (sel) {
+      const el = yEls.get(sel.diagramId);
+      if (sel.kind === 'node' && el && DRAGGABLE_TYPES.includes(el.diagramType ?? 'architecture')) {
+        const all = boxesOf(el);
+        const u = unionBox(selNodes.flatMap((n) => (all.has(n) ? [all.get(n)!] : [])));
+        if (u) return u;
+      }
+      // Anything else (a connection, or a part of another diagram type): its outline on screen.
+      if (partBox) {
+        const v = viewRef.current;
+        return { x: (partBox.left - v.x) / v.k, y: (partBox.top - v.y) / v.k, w: partBox.width / v.k, h: partBox.height / v.k };
+      }
+    }
+    const chosen = [...selection].map((id) => yEls.get(id)).filter(Boolean) as CanvasElement[];
+    return chosen.length ? elementBounds(chosen, byId) : null;
+  };
+  const canZoomSelection = !!sel || selection.size > 0;
+  const zoomToSelection = () => { const b = selectionBox(); if (b) zoomToBox(b); };
+
+  /** What the minimap draws: every element, and the parts inside diagrams. Only worked out while it's open. */
+  const minimapRects = useMemo(() => {
+    if (!minimap) return [];
+    const out: (Box & { kind: 'element' | 'part' })[] = [];
+    for (const e of els) {
+      const b = elementBounds([e], byId);
+      if (b) out.push({ ...b, kind: 'element' });
+      if (e.type === 'diagram' && DRAGGABLE_TYPES.includes(e.diagramType ?? 'architecture')) for (const pb of boxesOf(e).values()) out.push({ ...pb, kind: 'part' });
+    }
+    return out;
+  }, [minimap, els, byId]);
   const currentLabel = () => {
     const el = sel && yEls.get(sel.diagramId);
     if (!el || !sel) return '';
@@ -576,35 +853,94 @@ export function Canvas(p: Props) {
   const partNode = sel?.kind === 'node' && partEl ? parseDiagram(partType, partEl.code ?? '').nodes.find((n) => n.id === sel.id) : undefined;
 
   return (
-    <div className="canvas-shell">
-      <aside className="palette" aria-label="Components">
-        <div className="tools" role="toolbar" aria-label="Canvas tools">
+    <div className={`canvas-shell ${p.uiHidden ? 'ui-hidden' : ''}`}>
+      <nav className="rail" aria-label="Tools">
+        <div className="rail-card">
+          <button className={`rail-btn insert-toggle ${insertOpen ? 'active' : ''}`} aria-expanded={insertOpen} aria-keyshortcuts="/" aria-label={insertOpen ? 'Close insert menu' : 'Insert'} title="Insert components, shapes and groups (/)" onClick={toggleInsert}>
+            <Icon name={insertOpen ? 'close' : 'plus'} size={18} /><kbd>/</kbd>
+          </button>
+        </div>
+        <div className="rail-card" role="toolbar" aria-label="Canvas tools">
           {([
             ['select', 'Select', 'cursor', 'V', 'Select and edit components'],
             ['move', 'Move', 'move', 'M', 'Drag to look around the canvas (or hold Space)'],
             ['connect', 'Connect', 'arrow-right', 'C', 'Drag from one component to another'],
           ] as const).map(([id, label, icon, key, hint]) => (
-            <button key={id} className={activeTool === id ? 'active' : ''} aria-pressed={activeTool === id} aria-keyshortcuts={key} title={`${hint} (${key})`} onClick={() => setTool(id)}>
-              <kbd>{key}</kbd>
-              <Icon name={icon} size={18} />
-              <span>{label}</span>
+            <button key={id} className={`rail-btn ${activeTool === id ? 'active' : ''}`} aria-pressed={activeTool === id} aria-keyshortcuts={key} aria-label={label} title={`${label}: ${hint} (${key})`} onClick={() => setTool(id)}>
+              <Icon name={icon} size={18} /><kbd>{key}</kbd>
             </button>
           ))}
         </div>
-        <h2>Components</h2>
-        <div className="palette-grid">
-          {COMPONENTS.map((c) => (
-            <button key={c.name} draggable title={`Drag ${c.name} onto the canvas, or click to add it`} onClick={() => addComponent(c.name)} onDragStart={(e) => { e.dataTransfer.setData(DRAG_TYPE, c.name); e.dataTransfer.effectAllowed = 'copy'; }}>
-              <Icon name={c.icon} size={20} /><span>{c.name}</span>
+        <div className="rail-card" role="toolbar" aria-label="Shapes">
+          {SHAPES.filter((x) => x.key).map((x) => (
+            <button key={x.shape} className={`rail-btn ${armedShape?.shape === x.shape ? 'active' : ''}`} aria-pressed={armedShape?.shape === x.shape} aria-keyshortcuts={x.key} aria-label={x.label} title={`${x.label} (${x.key}): then click the canvas to place one`} onClick={() => { closeInsert(); armShape(x.shape); }}>
+              <Icon name={`shape-${x.shape}`} size={18} /><kbd>{x.key}</kbd>
             </button>
           ))}
         </div>
-        <button className="palette-group" draggable title="Drag a group onto the canvas, or click to add one" onClick={() => addComponent(GROUP)} onDragStart={(e) => { e.dataTransfer.setData(DRAG_TYPE, GROUP); e.dataTransfer.effectAllowed = 'copy'; }}>
-          <Icon name="frame" size={18} /> Group
-        </button>
-      </aside>
+        <div className="rail-card">
+          <button className="rail-btn" aria-keyshortcuts="?" aria-label="Keyboard shortcuts" title="Keyboard shortcuts (?)" onClick={() => setHelpOpen(true)}><Icon name="keyboard" size={18} /><kbd>?</kbd></button>
+        </div>
+      </nav>
+      {insertOpen && (
+        <div className={`insert-pop ${insertDrag ? 'ghost' : ''}`} role="dialog" aria-label="Insert" onKeyDown={(e) => {
+          if (e.key === 'Escape') { e.preventDefault(); closeInsert(); host.current?.focus({ preventScroll: true }); }
+          if (e.key === 'Backspace' && !insertQuery && insertView !== 'root' && (e.target as HTMLElement).tagName === 'INPUT') setInsertView('root');
+        }}>
+          <div className="insert-search">
+            {insertView !== 'root' && !q ? <button className="ghost" aria-label="Back" title="Back" onClick={() => setInsertView('root')}><Icon name="back" size={16} /></button> : <Icon name="search" size={16} />}
+            <input autoFocus type="search" placeholder={insertView === 'root' || q ? 'Insert item' : `Search ${insertView}`} aria-label="Search items to insert" value={insertQuery} onChange={(e) => setInsertQuery(e.target.value)} />
+          </div>
+          <div className="insert-list">
+            {!q && insertView === 'root' && (
+              <>
+                <h3>All categories</h3>
+                <button className="insert-row" onClick={() => setInsertView('components')}><span className="lib-icon"><Icon name="server" size={18} /></span><span className="insert-text"><b>Components</b><small>Services, databases, queues, clients and more</small></span><Icon name="arrow-right" size={14} /></button>
+                <button className="insert-row" onClick={() => setInsertView('shapes')}><span className="lib-icon"><Icon name="shape-hexagon" size={18} /></span><span className="insert-text"><b>Shapes</b><small>Rectangles, diamonds, hexagons and more</small></span><Icon name="arrow-right" size={14} /></button>
+                <div className="insert-tiles">
+                  <button className="insert-tile" title="Drag a group onto the canvas" draggable onDragStart={(e) => { e.dataTransfer.setData(DRAG_TYPE, GROUP); e.dataTransfer.effectAllowed = 'copy'; setInsertDrag(true); }} onDragEnd={closeInsert}><Icon name="frame" size={20} /><span>Group</span></button>
+                </div>
+              </>
+            )}
+            {(q || insertView === 'components') && !!insertComponents.length && (
+              <section>
+                {q && <h3>Components</h3>}
+                {(q ? [['', insertComponents.map((c) => c.name)] as [string, string[]]] : CATEGORIES.map(([cat, names]) => [cat, names.filter((nm) => insertComponents.some((c) => c.name === nm))] as [string, string[]]).filter(([, names]) => names.length)).map(([cat, names]) => (
+                  <div key={cat || 'all'}>
+                    {cat && <h3>{cat}</h3>}
+                    {names.map((nm) => { const c = COMPONENTS.find((k) => k.name === nm)!; return (
+                      <button key={c.name} className="insert-row" title={`Drag ${c.name} onto the canvas`} draggable onDragStart={(e) => { e.dataTransfer.setData(DRAG_TYPE, c.name); e.dataTransfer.effectAllowed = 'copy'; setInsertDrag(true); }} onDragEnd={closeInsert}>
+                        <span className="lib-icon"><Icon name={c.icon} size={18} /></span><span className="insert-text"><b>{c.name}</b></span>
+                      </button>
+                    ); })}
+                  </div>
+                ))}
+              </section>
+            )}
+            {(q || insertView === 'shapes') && !!insertShapes.length && (
+              <section>
+                {q && <h3>Shapes</h3>}
+                {insertShapes.map((x) => (
+                  <button key={x.shape} className="insert-row" title={`Drag ${x.label} onto the canvas`} draggable onDragStart={(e) => { e.dataTransfer.setData(DRAG_TYPE, SHAPE_PREFIX + x.shape); e.dataTransfer.effectAllowed = 'copy'; setInsertDrag(true); }} onDragEnd={closeInsert}>
+                    <span className="lib-icon"><Icon name={`shape-${x.shape}`} size={18} /></span><span className="insert-text"><b>{x.label}</b></span>{x.key && <kbd>{x.key}</kbd>}
+                  </button>
+                ))}
+              </section>
+            )}
+            {q && insertGroup && (
+              <section>
+                <h3>Group</h3>
+                <button className="insert-row" title="Drag a group onto the canvas" draggable onDragStart={(e) => { e.dataTransfer.setData(DRAG_TYPE, GROUP); e.dataTransfer.effectAllowed = 'copy'; setInsertDrag(true); }} onDragEnd={closeInsert}><span className="lib-icon"><Icon name="frame" size={18} /></span><span className="insert-text"><b>Group</b></span></button>
+              </section>
+            )}
+            {q && !insertComponents.length && !insertShapes.length && !insertGroup && <p className="muted small insert-empty">Nothing matches "{insertQuery}".</p>}
+          </div>
+          <div className="insert-foot muted small"><span>Drag an item onto the canvas</span><span><kbd>Esc</kbd> to close</span></div>
+        </div>
+      )}
+      {helpOpen && <ShortcutsHelp shapes={SHAPES.filter((s) => s.key).map((s) => ({ key: s.key!, label: s.label }))} onClose={() => { setHelpOpen(false); host.current?.focus({ preventScroll: true }); }} />}
       <div
-        className={`canvas ${activeTool === 'connect' ? 'connect-mode' : ''} ${activeTool === 'move' ? 'move-mode' : ''} ${panning ? 'panning' : ''}`}
+        className={`canvas ${activeTool === 'connect' ? 'connect-mode' : ''} ${activeTool === 'move' ? 'move-mode' : ''} ${activeTool === 'shape' ? 'shape-mode' : ''} ${panning ? 'panning' : ''}`}
         ref={host}
         tabIndex={0}
         aria-label="Canvas"
@@ -637,6 +973,12 @@ export function Canvas(p: Props) {
                 return <circle key={end} cx={q.x} cy={q.y} r={6 / view.k} fill="var(--bg)" stroke="var(--accent)" strokeWidth={1.5 / view.k} style={{ cursor: 'move' }} onPointerDown={(e) => startArrowEnd(e, single, end)} />;
               });
             })()}
+            {multiBoxes && [...multiBoxes].filter(([n]) => n !== sel?.id).map(([n, b]) => (
+              <rect key={n} className="no-hit" x={b.x - 3 / view.k} y={b.y - 3 / view.k} width={b.w + 6 / view.k} height={b.h + 6 / view.k} rx={5 / view.k} fill="none" stroke="var(--accent)" strokeWidth={2 / view.k} />
+            ))}
+            {guides.map((g, i) => (g.axis === 'x'
+              ? <line key={i} className="no-hit smart-guide" x1={g.at} x2={g.at} y1={g.from} y2={g.to} strokeWidth={1 / view.k} />
+              : <line key={i} className="no-hit smart-guide" y1={g.at} y2={g.at} x1={g.from} x2={g.to} strokeWidth={1 / view.k} />))}
           </g>
         </svg>
 
@@ -645,6 +987,9 @@ export function Canvas(p: Props) {
             {sel?.kind === 'node' && !renaming && activeTool === 'select' && <div className="part-connect" role="button" aria-label="Drag to connect to another component" title="Drag to another component to connect" onPointerDown={(e) => { if (sel) startConnect(e, sel.diagramId, sel.id); }} />}
             {partNode && !partNode.isGroup && !renaming && activeTool === 'select' && DRAGGABLE_TYPES.includes(partType) && <div className="part-resize" role="button" aria-label="Drag to resize this component" title="Drag to resize" onPointerDown={startNodeResize} />}
           </div>
+        )}
+        {partBox && sel && partNode && !renaming && !connecting && activeTool === 'select' && !p.uiHidden && selNodes.length < 2 && VISUAL_TYPES.includes(partType) && (
+          <StyleBar box={partBox} props={partNode.props} isGroup={partNode.isGroup} onChange={(patch) => changeDiagramCode(sel.diagramId, (t, c) => setNodeProps(t, c, sel.id, patch))} />
         )}
         {connecting && (
           <svg className="connect-line" width="100%" height="100%"><line x1={connecting.x0} y1={connecting.y0} x2={connecting.x1} y2={connecting.y1} stroke="var(--accent)" strokeWidth="2" strokeDasharray="5 4" /></svg>
@@ -694,12 +1039,33 @@ export function Canvas(p: Props) {
           <button aria-label="Redo" title="Redo (Ctrl+Shift+Z)" onClick={() => undo.redo()}><Icon name="redo" /></button>
           <span className="tool-sep" />
           <button aria-label="Zoom out" title="Zoom out" onClick={() => zoomAt(1 / 1.2)}>−</button>
-          <button className="zoom-val" title="Reset zoom" onClick={() => setView((v) => ({ ...v, k: 1 }))}>{Math.round(view.k * 100)}%</button>
+          <ZoomMenu
+            zoom={view.k} onZoomIn={() => zoomAt(1.2)} onZoomOut={() => zoomAt(1 / 1.2)}
+            onHand={() => setTool('move')} handActive={activeTool === 'move'}
+            onFit={fit} onZoomSelection={zoomToSelection} canZoomSelection={canZoomSelection} onZoom100={() => zoomTo(1)}
+            minimap={minimap} onToggleMinimap={() => setMinimap((m) => !m)} onHideUi={p.onToggleUi}
+          />
           <button aria-label="Zoom in" title="Zoom in" onClick={() => zoomAt(1.2)}>+</button>
-          <button aria-label="Fit to content" title="Fit (Ctrl+0)" onClick={fit}><Icon name="fit" /></button>
+          <button aria-label="Fit to content" title="Fit (Ctrl+0, Shift+1)" onClick={fit}><Icon name="fit" /></button>
         </div>
+        {minimap && !p.uiHidden && size.w > 0 && <Minimap rects={minimapRects} view={view} size={size} onPan={centerOn} />}
+        {multiBoxes && multiBoxes.size > 1 && !p.uiHidden && !guides.length && activeTool === 'select' && (() => {
+          const u = unionBox(multiBoxes.values())!;
+          return (
+            <AlignBar
+              left={(u.x + u.w / 2) * view.k + view.x} top={Math.max(8, u.y * view.k + view.y - 48)} count={multiBoxes.size}
+              onAlign={alignNodes} onDistribute={distributeNodes}
+            />
+          );
+        })()}
+        {p.uiHidden && p.onToggleUi && (
+          <button className="show-ui" onPointerDown={(e) => e.stopPropagation()} onClick={p.onToggleUi} title="Show the toolbars and panels again">
+            Show UI <kbd>Esc</kbd>
+          </button>
+        )}
 
         {activeTool === 'connect' && <div className="mode-hint" role="status">Drag from one component to another. Press <kbd>Esc</kbd> when you're done.</div>}
+        {armedShape && <div className="mode-hint" role="status">Click on the canvas to place a {armedShape.label.toLowerCase()}. Press <kbd>Esc</kbd> to cancel.</div>}
         {empty && (
           <div className="canvas-empty">
             <b>Drag a component here to start</b>
