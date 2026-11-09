@@ -4,7 +4,7 @@ import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { ApiError, get, OFFLINE_STATUS, setUser, useToasts, useUser } from './api.ts';
 import { HomePage } from './pages/Home.tsx';
 import { EditorPage } from './pages/Editor.tsx';
-import { PwaStatus, registerPwa } from './pwa.tsx';
+import { applyUpdate, PwaStatus, registerPwa, useUpdateReady } from './pwa.tsx';
 import './styles.css';
 
 registerPwa();
@@ -61,6 +61,10 @@ function App() {
       .catch((e) => { setError(e); setUser(null); });
   };
   useEffect(load, []);
+  // The normal screen offers new versions through PwaStatus, which this error screen never shows.
+  // Nothing can be lost here, so switch to a waiting version straight away: it may fix the problem.
+  const updateReady = useUpdateReady();
+  useEffect(() => { if (!user && error && updateReady) applyUpdate(); }, [user, error, updateReady]);
   if (user === undefined) return <div className="center muted">Loading…</div>;
   if (!user) return <ServerProblem error={error} onRetry={load} />;
   return (

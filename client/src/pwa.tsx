@@ -32,6 +32,15 @@ export function registerPwa() {
   });
 }
 
+/** Switches to the waiting version and reloads once it takes over. Returns false when there is none. */
+export function applyUpdate() {
+  if (!waitingWorker || !('serviceWorker' in navigator)) return false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => location.reload(), { once: true });
+  waitingWorker.postMessage('skip-waiting');
+  return true;
+}
+export const useUpdateReady = () => useSyncExternalStore(subscribe, () => waitingWorker !== null);
+
 export function InstallButton() {
   const available = useSyncExternalStore(subscribe, () => installEvent !== null);
   if (!available) return null;
