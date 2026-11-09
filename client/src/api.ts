@@ -35,7 +35,11 @@ export async function api<T = any>(method: string, path: string, body?: unknown)
   setServedFromCache(res.headers.get('x-devart-offline') === '1');
   const isJson = res.headers.get('content-type')?.includes('json');
   const data = isJson ? await res.json() : await res.text();
-  if (!res.ok) throw new ApiError(res.status, (isJson && (data as any).error) || `Request failed (${res.status})`);
+  if (!res.ok) {
+    // Plain-text errors (like the server's host check) are worth showing; HTML error pages are not.
+    const text = !isJson && typeof data === 'string' && data.length < 300 && !data.trimStart().startsWith('<') ? data.trim() : '';
+    throw new ApiError(res.status, (isJson && (data as any).error) || text || `Request failed (${res.status})`);
+  }
   return data as T;
 }
 export const get = <T = any>(p: string) => api<T>('GET', p);
@@ -48,7 +52,7 @@ export interface User { id: string; email: string; name: string; theme: Theme }
 // Small global stores for the local user, theme, and toasts.
 let currentUser: User | null | undefined;
 const userSubs = new Set<() => void>();
-export function setUser(u: User | null) {
+export function setUser(u: User | null | undefined) {
   currentUser = u;
   if (u) applyTheme(u.theme);
   userSubs.forEach((f) => f());

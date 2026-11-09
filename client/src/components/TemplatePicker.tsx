@@ -8,7 +8,7 @@ interface Template { id: string; name: string; description: string; type: Diagra
 
 // Matches the home page's .choice cards, which the page keeps to its one main action.
 const CARD = {
-  display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 6, padding: 16, textAlign: 'left', whiteSpace: 'normal',
+  display: 'flex', flexDirection: 'column', alignItems: 'flex-start', justifyContent: 'flex-start', gap: 6, padding: 16, textAlign: 'left', whiteSpace: 'normal',
   border: '1px solid var(--line)', borderRadius: 12, background: 'var(--bg)', color: 'var(--fg)', cursor: 'pointer', height: '100%',
 } as const;
 
@@ -40,7 +40,7 @@ export function TemplatePicker() {
           <button key={t.id} className="template-card" style={CARD} disabled={busy !== null} onClick={() => start(t)}>
             <b>{t.name}</b>
             <span className="small">{t.description}</span>
-            <span className="muted small">{TYPE_LABEL[t.type] ?? t.type}</span>
+            <span className="muted small template-type">{TYPE_LABEL[t.type] ?? t.type}</span>
           </button>
         ))}
       </div>

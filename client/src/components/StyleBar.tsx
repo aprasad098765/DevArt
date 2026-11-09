@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { Props } from '../../../shared/dsl.ts';
 import type { PropValue } from '../../../shared/dslEdit.ts';
 import { color } from '../../../shared/render.ts';
@@ -8,6 +8,9 @@ import { Icon } from './ui.tsx';
 
 const truthy = (v: string | undefined) => !!v && !/^(false|no|0|off)$/i.test(v);
 const BAR_H = 38;
+const EDGE_GAP = 8;
+/** The tool rail's right edge (left offset 12px + card) plus a gap. */
+const RAIL_W = 64;
 
 interface StyleBarProps {
   /** The selected component's outline, in pixels within the canvas. */
@@ -29,8 +32,21 @@ export function StyleBar({ box, props: p, isGroup, onChange }: StyleBarProps) {
     return () => window.removeEventListener('pointerdown', close);
   }, [open]);
 
+  // Keep the bar inside the canvas and clear of the tool rail on the left, instead of centring it off-screen.
+  const [width, setWidth] = useState({ bar: 0, canvas: 0 });
+  useLayoutEffect(() => {
+    const el = ref.current;
+    const parent = el?.offsetParent as HTMLElement | null;
+    if (!el || !parent) return;
+    const next = { bar: el.offsetWidth, canvas: parent.clientWidth };
+    if (next.bar !== width.bar || next.canvas !== width.canvas) setWidth(next);
+  });
+  const centre = box.left + box.width / 2;
+  const half = width.bar / 2;
+  const railRoom = width.canvas - EDGE_GAP - RAIL_W >= width.bar ? RAIL_W : EDGE_GAP;
+  const left = width.bar ? Math.min(Math.max(centre, railRoom + half), Math.max(railRoom + half, width.canvas - EDGE_GAP - half)) : centre;
   const below = box.top < BAR_H + 14;
-  const style = { left: box.left + box.width / 2, top: below ? box.top + box.height + 10 : box.top - BAR_H - 10 };
+  const style = { left, top: below ? box.top + box.height + 10 : box.top - BAR_H - 10 };
   const fill = p.fill?.toLowerCase();
   const noFill = !!fill && /^(none|transparent)$/.test(fill);
   const align = (TEXT_ALIGNS as readonly string[]).includes(p.align ?? '') ? p.align : 'center';

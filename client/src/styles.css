@@ -54,6 +54,8 @@ code { font-family: var(--mono); font-size: 12px; background: var(--bg3); paddin
 .choice .icon { color: var(--accent); margin-bottom: 4px; }
 .choice b { font-size: 16px; } .choice span { color: var(--muted); line-height: 1.4; }
 .recent, .templates { margin-top: 48px; } .recent h2, .templates h2 { margin-bottom: 12px; }
+.template-card .template-type { margin-top: auto; }
+.server-problem { max-width: 520px; padding: 0 16px; } .server-problem p { line-height: 1.5; } .server-problem small { display: block; margin-top: 8px; word-break: break-word; }
 .file-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 14px; }
 .file-card { position: relative; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); }
 .file-card:hover { border-color: var(--muted); }
@@ -164,13 +166,15 @@ code { font-family: var(--mono); font-size: 12px; background: var(--bg3); paddin
 .issues { margin: 0; padding: 8px 12px; list-style: none; font-size: 12px; max-height: 130px; overflow-y: auto; flex: none; border-top: 1px solid var(--line); } .issues li { padding: 2px 0; } .issues .error { color: var(--danger); } .issues .warning { color: var(--warn); }
 
 @media (max-width: 860px) {
-  .save-state { display: none; }
-  .title-input { width: auto; flex: 1; }
-  .canvas-shell { flex-direction: column; min-width: 0; }
+  .save-state, .topbar .grow { display: none; }
+  .title-input { width: auto; flex: 1; min-width: 0; text-overflow: ellipsis; }
+  /* The properties panel sits below the canvas rather than over it, so the tool rail always fits beside the canvas. */
+  .editor-body { flex-direction: column; }
+  .canvas-shell { flex-direction: column; min-width: 0; min-height: 0; }
   .rail-btn { width: 40px; height: 40px; }
   .insert-pop { left: 64px; width: auto; right: 12px; max-width: none; }
   .canvas { min-height: 0; }
-  .dpanel { position: absolute; top: auto; left: 0; right: 0; bottom: 0; width: 100%; max-height: 45%; border-left: 0; border-top: 1px solid var(--line); }
+  .dpanel { flex: 0 0 40%; width: 100%; border-left: 0; border-top: 1px solid var(--line); }
 }
 
 /* ==== Canvas view and arrangement: zoom menu, minimap, align bar, smart guides, Hide UI ==== */

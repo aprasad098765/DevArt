@@ -419,13 +419,18 @@ try {
     await m.getByRole('button', { name: /Draw Manually/ }).click();
     await m.waitForURL(/\/f\//);
     assert.equal(await m.locator('.insert-pop').count(), 0, 'the insert menu starts closed');
-    await (await item(m, 'Service')).dragTo(m.locator('.canvas'), { targetPosition: { x: 150, y: 450 } });
+    await (await item(m, 'Service')).dragTo(m.locator('.canvas'), { targetPosition: { x: 150, y: 300 } });
     await part(m, 'Service').waitFor();
     await m.waitForTimeout(200);
     await shot(m, 'mobile-editor');
     await noOverflow();
-    await m.locator('.canvas').click({ position: { x: 300, y: 250 } }); // deselect so the properties sheet does not cover the drop spot
-    await (await item(m, 'Database')).dragTo(m.locator('.canvas'), { targetPosition: { x: 300, y: 550 } });
+    const rail = (await m.locator('.rail').boundingBox())!;
+    const panel = (await m.locator('.dpanel').boundingBox())!;
+    assert.ok(rail.y + rail.height <= panel.y + 1, 'the tool rail stays above the properties panel');
+    const bar = (await m.locator('.style-bar').boundingBox())!;
+    assert.ok(bar.x >= rail.x + rail.width && bar.x + bar.width <= 390, 'the style bar stays on screen and clear of the rail');
+    await m.locator('.canvas').click({ position: { x: 300, y: 120 } });
+    await (await item(m, 'Database')).dragTo(m.locator('.canvas'), { targetPosition: { x: 300, y: 340 } });
     await part(m, 'Database').waitFor();
     await m.waitForTimeout(200);
     await shot(m, 'mobile-editor-2');
@@ -433,6 +438,29 @@ try {
     const added = await boxOf(m, 'Database');
     assert.ok(added.x >= canvas.x && added.x + added.width <= canvas.x + canvas.width, 'a clicked component lands in view');
     await m.context().close();
+  });
+
+  await step('a server problem says what went wrong instead of always "npm start"', async () => {
+    // Service workers would answer /me before page.route sees it.
+    const ctx = await browser.newContext({ serviceWorkers: 'block' });
+    const p = await ctx.newPage();
+    p.on('pageerror', (e) => problems.push(`pageerror: ${e.message}`));
+    const cases: [number, string, string, RegExp][] = [
+      [403, 'text/plain', 'DevArt only accepts requests addressed to this machine.', /refused this address/],
+      [404, 'text/html', '<!doctype html><title>Not found</title>', /API isn't available/],
+      [200, 'text/html', '<!doctype html><div id="root"></div>', /API isn't available/],
+      [500, 'application/json', '{"error":"boom"}', /ran into a problem/],
+    ];
+    for (const [status, contentType, body, heading] of cases) {
+      await p.route('**/api/v1/me', (r) => r.fulfill({ status, contentType, body }));
+      await p.goto(BASE);
+      await p.getByRole('heading', { name: heading }).waitFor();
+      assert.equal(await p.getByText(/Start it with/).count(), 0, `status ${status} is not reported as a stopped local server`);
+      await p.unroute('**/api/v1/me');
+    }
+    await p.getByRole('button', { name: 'Try again' }).click();
+    await p.waitForSelector('.choices');
+    await p.context().close();
   });
 } finally {
   await browser.close();
