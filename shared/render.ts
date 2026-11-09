@@ -919,11 +919,20 @@ export function renderElement(el: CanvasElement, byId: Map<string, CanvasElement
     case 'arrow': {
       const pts = resolveArrowPoints(el, byId);
       const c = color(el.stroke) ?? p.line;
-      const d = el.routing === 'curve' ? smooth(pts) : pts.map((q, i) => `${i ? 'L' : 'M'}${n(q.x)} ${n(q.y)}`).join('');
+      // Heads grow with the line width, and the line stops at the head's base so it never pokes through the tip.
+      const head = 11 + sw * 2.5;
+      const shown = pts.map((q) => ({ ...q }));
+      const pull = (i: number, toward: number, by: number) => {
+        const dx = pts[toward].x - pts[i].x, dy = pts[toward].y - pts[i].y, len = Math.hypot(dx, dy);
+        if (len > by * 1.2) { shown[i] = { x: pts[i].x + (dx / len) * by, y: pts[i].y + (dy / len) * by }; }
+      };
+      if (el.endHead !== false && pts.length > 1) pull(pts.length - 1, pts.length - 2, head * 0.75);
+      if (el.startHead && pts.length > 1) pull(0, 1, head * 0.75);
+      const d = el.routing === 'curve' ? smooth(shown) : shown.map((q, i) => `${i ? 'L' : 'M'}${n(q.x)} ${n(q.y)}`).join('');
       // A wide invisible stroke keeps thin arrows easy to click.
-      body = `<path d="${d}" fill="none" stroke="transparent" stroke-width="14"/><path d="${d}" fill="none" stroke="${esc(c)}" stroke-width="${n(sw)}" ${dashFor(el.strokeStyle)}/>`;
-      if (el.endHead !== false && pts.length > 1) body += arrowHead(pts.at(-1)!, pts.at(-2)!, c, 8 + sw);
-      if (el.startHead && pts.length > 1) body += arrowHead(pts[0], pts[1], c, 8 + sw);
+      body = `<path d="${d}" fill="none" stroke="transparent" stroke-width="14"/><path d="${d}" fill="none" stroke="${esc(c)}" stroke-width="${n(sw)}" stroke-linecap="round" stroke-linejoin="round" ${dashFor(el.strokeStyle)}/>`;
+      if (el.endHead !== false && pts.length > 1) body += arrowHead(pts.at(-1)!, pts.at(-2)!, c, head);
+      if (el.startHead && pts.length > 1) body += arrowHead(pts[0], pts[1], c, head);
       if (el.text) {
         const m = pts[Math.floor(pts.length / 2 - 0.5)], m2 = pts[Math.ceil(pts.length / 2 - 0.5)];
         const mx = (m.x + m2.x) / 2, my = (m.y + m2.y) / 2, tw = textWidth(el.text, 12) + 10;

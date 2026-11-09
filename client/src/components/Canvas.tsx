@@ -16,7 +16,7 @@ import { StyleBar } from './StyleBar.tsx';
 import { registerUndo } from './controls.tsx';
 
 /** 'shape' means a shape is armed: the next click on the canvas places it. */
-type Tool = 'select' | 'move' | 'connect' | 'shape';
+type Tool = 'select' | 'move' | 'connect' | 'shape' | 'line' | 'arrow';
 interface View { x: number; y: number; k: number }
 
 const COMPONENTS: { name: string; icon: string }[] = [
@@ -41,6 +41,10 @@ const SHAPES: ShapeSpec[] = [
 ];
 /** Shapes travel through drag-and-drop and addComponent as `shape:<name>`, next to component names. */
 const SHAPE_PREFIX = 'shape:';
+/** Free-standing lines and arrows are drawn by dragging, or dropped from the Insert menu as `line:<kind>`. */
+type LineKind = 'line' | 'arrow';
+const LINES: { kind: LineKind; label: string; key: string }[] = [{ kind: 'line', label: 'Line', key: 'L' }, { kind: 'arrow', label: 'Arrow', key: 'A' }];
+const LINE_PREFIX = 'line:';
 const shapeOf = (name: string) => (name.startsWith(SHAPE_PREFIX) ? SHAPES.find((s) => s.shape === name.slice(SHAPE_PREFIX.length)) : undefined);
 const DRAG_TYPE = 'application/x-devart-component';
 const HANDLES = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'] as const;
@@ -121,6 +125,14 @@ export function Canvas(p: Props) {
   const insertShapes = SHAPES.filter((x) => !q || x.label.toLowerCase().includes(q));
   const insertGroup = !q || 'group'.includes(q);
   const armShape = (s: ShapeName) => { setArmed(s); setTool('shape'); };
+  const lineTool = activeTool === 'line' || activeTool === 'arrow' ? LINES.find((l) => l.kind === activeTool) : undefined;
+  /** Adds a free-standing line or arrow from `from` to `to`, in front of everything else. */
+  const makeLine = (kind: LineKind, from: Point, to: Point) => {
+    const z = Math.max(0, ...[...yEls.values()].map((e) => e.z)) + 1;
+    const el: CanvasElement = { id: uid(), type: 'arrow', x: from.x, y: from.y, w: 0, h: 0, z, points: [{ x: 0, y: 0 }, { x: to.x - from.x, y: to.y - from.y }], routing: 'straight', startHead: false, endHead: kind === 'arrow', strokeWidth: 2 };
+    yEls.set(el.id, el);
+    return el;
+  };
   const [helpOpen, setHelpOpen] = useState(false);
   const [selection, setSelection] = useState<Set<string>>(new Set());
   const [editing, setEditing] = useState<string | null>(null);
@@ -346,6 +358,30 @@ export function Canvas(p: Props) {
     // The move tool only drags the view: it never selects or edits anything.
     if (activeTool === 'move') return startPan(e);
     const pt = toWorld(e.clientX, e.clientY);
+    // The line and arrow tools draw by dragging; a plain click draws nothing. Shift keeps the angle to 45 degrees.
+    if (lineTool) {
+      e.preventDefault();
+      const from = { x: snapV(pt.x), y: snapV(pt.y) };
+      let el: CanvasElement | undefined;
+      beginDrag(e, (ev) => {
+        const q = toWorld(ev.clientX, ev.clientY);
+        let to = { x: snapV(q.x), y: snapV(q.y) };
+        if (ev.shiftKey) {
+          const dx = to.x - from.x, dy = to.y - from.y;
+          const a = Math.round(Math.atan2(dy, dx) / (Math.PI / 4)) * (Math.PI / 4);
+          to = { x: snapV(from.x + Math.cos(a) * Math.hypot(dx, dy)), y: snapV(from.y + Math.sin(a) * Math.hypot(dx, dy)) };
+        }
+        if (!el) { if (Math.hypot(q.x - from.x, q.y - from.y) < 6) return; el = makeLine(lineTool.kind, from, to); return; }
+        const cur = yEls.get(el.id);
+        if (cur) yEls.set(el.id, { ...cur, points: [{ x: 0, y: 0 }, { x: to.x - from.x, y: to.y - from.y }] });
+      }, () => {
+        // A press that drew nothing keeps the tool armed; drawing something returns to Select.
+        if (!el) return;
+        select([el.id]);
+        setTool('select');
+      });
+      return;
+    }
     // An armed shape is placed with its middle under the pointer, like a drop, then the tool goes back to Select.
     if (activeTool === 'shape') {
       e.preventDefault();
@@ -634,6 +670,8 @@ export function Canvas(p: Props) {
     if (!mod && !e.altKey && !e.shiftKey) {
       const s = SHAPES.find((k) => k.key?.toLowerCase() === e.key.toLowerCase());
       if (s) { e.preventDefault(); armShape(s.shape); }
+      const l = LINES.find((k) => k.key.toLowerCase() === e.key.toLowerCase());
+      if (l) { e.preventDefault(); closeInsert(); setTool(l.kind); }
     }
   };
   useEffect(() => {
@@ -877,6 +915,11 @@ export function Canvas(p: Props) {
               <Icon name={`shape-${x.shape}`} size={18} /><kbd>{x.key}</kbd>
             </button>
           ))}
+          {LINES.map((l) => (
+            <button key={l.kind} className={`rail-btn ${activeTool === l.kind ? 'active' : ''}`} aria-pressed={activeTool === l.kind} aria-keyshortcuts={l.key} aria-label={l.label} title={`${l.label} (${l.key}): drag on the canvas to draw one`} onClick={() => { closeInsert(); setTool(l.kind); }}>
+              <Icon name={`draw-${l.kind}`} size={18} /><kbd>{l.key}</kbd>
+            </button>
+          ))}
         </div>
         <div className="rail-card">
           <button className="rail-btn" aria-keyshortcuts="?" aria-label="Keyboard shortcuts" title="Keyboard shortcuts (?)" onClick={() => setHelpOpen(true)}><Icon name="keyboard" size={18} /><kbd>?</kbd></button>
@@ -917,12 +960,17 @@ export function Canvas(p: Props) {
                 ))}
               </section>
             )}
-            {(q || insertView === 'shapes') && !!insertShapes.length && (
+            {(q || insertView === 'shapes') && (!!insertShapes.length || (!!q && LINES.some((l) => l.label.toLowerCase().includes(q)))) && (
               <section>
                 {q && <h3>Shapes</h3>}
                 {insertShapes.map((x) => (
                   <button key={x.shape} className="insert-row" title={`Drag ${x.label} onto the canvas`} draggable onDragStart={(e) => { e.dataTransfer.setData(DRAG_TYPE, SHAPE_PREFIX + x.shape); e.dataTransfer.effectAllowed = 'copy'; setInsertDrag(true); }} onDragEnd={closeInsert}>
                     <span className="lib-icon"><Icon name={`shape-${x.shape}`} size={18} /></span><span className="insert-text"><b>{x.label}</b></span>{x.key && <kbd>{x.key}</kbd>}
+                  </button>
+                ))}
+                {(!q || 'line'.includes(q) || 'arrow'.includes(q)) && LINES.filter((l) => !q || l.label.toLowerCase().includes(q)).map((l) => (
+                  <button key={l.kind} className="insert-row" title={`Drag ${l.label.toLowerCase()} onto the canvas`} draggable onDragStart={(e) => { e.dataTransfer.setData(DRAG_TYPE, LINE_PREFIX + l.kind); e.dataTransfer.effectAllowed = 'copy'; setInsertDrag(true); }} onDragEnd={closeInsert}>
+                    <span className="lib-icon"><Icon name={`draw-${l.kind}`} size={18} /></span><span className="insert-text"><b>{l.label}</b></span><kbd>{l.key}</kbd>
                   </button>
                 ))}
               </section>
@@ -940,7 +988,7 @@ export function Canvas(p: Props) {
       )}
       {helpOpen && <ShortcutsHelp shapes={SHAPES.filter((s) => s.key).map((s) => ({ key: s.key!, label: s.label }))} onClose={() => { setHelpOpen(false); host.current?.focus({ preventScroll: true }); }} />}
       <div
-        className={`canvas ${activeTool === 'connect' ? 'connect-mode' : ''} ${activeTool === 'move' ? 'move-mode' : ''} ${activeTool === 'shape' ? 'shape-mode' : ''} ${panning ? 'panning' : ''}`}
+        className={`canvas ${activeTool === 'connect' ? 'connect-mode' : ''} ${activeTool === 'move' ? 'move-mode' : ''} ${activeTool === 'shape' || lineTool ? 'shape-mode' : ''} ${panning ? 'panning' : ''}`}
         ref={host}
         tabIndex={0}
         aria-label="Canvas"
@@ -954,6 +1002,14 @@ export function Canvas(p: Props) {
           if (!name) return;
           e.preventDefault();
           const pt = toWorld(e.clientX, e.clientY);
+          if (name.startsWith(LINE_PREFIX)) {
+            // A dropped line or arrow is 120 px long and horizontal, centred on the pointer.
+            undo.stopCapturing();
+            const el = makeLine(name.slice(LINE_PREFIX.length) as LineKind, { x: snapV(pt.x - 60), y: snapV(pt.y) }, { x: snapV(pt.x + 60), y: snapV(pt.y) });
+            undo.stopCapturing();
+            select([el.id]);
+            return;
+          }
           // The pointer is held by the component's middle, not its corner.
           addComponent(name, { x: pt.x - 48, y: pt.y - 38 });
         }}
@@ -1065,6 +1121,7 @@ export function Canvas(p: Props) {
         )}
 
         {activeTool === 'connect' && <div className="mode-hint" role="status">Drag from one component to another. Press <kbd>Esc</kbd> when you're done.</div>}
+        {lineTool && <div className="mode-hint" role="status">Drag on the canvas to draw {lineTool.kind === 'arrow' ? 'an arrow' : 'a line'}. Hold <kbd>Shift</kbd> for 45° angles, <kbd>Esc</kbd> to cancel.</div>}
         {armedShape && <div className="mode-hint" role="status">Click on the canvas to place a {armedShape.label.toLowerCase()}. Press <kbd>Esc</kbd> to cancel.</div>}
         {empty && (
           <div className="canvas-empty">

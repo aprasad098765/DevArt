@@ -18,7 +18,7 @@ const EXTRA: Record<string, string> = {
   moon: 'M20 14A8 8 0 0 1 10 4a8 8 0 1 0 10 10z', trash: 'M4 7h16M9 7V4h6v3M6 7l1 14h10l1-14', download: 'M12 3v12M8 11l4 4 4-4M5 19h14', dots: 'M5 12h.01M12 12h.01M19 12h.01',
   cursor: 'M5 3l14 8-6 2-2 6z', move: 'M12 3v18M3 12h18M12 3l-3 3M12 3l3 3M12 21l-3-3M12 21l3-3M3 12l3-3M3 12l3 3M21 12l-3-3M21 12l-3 3', copy: 'M8 8h12v12H8zM4 16V4h12', check: 'M4 12l5 5L20 6', pen: 'M4 20l1-5L16 4l4 4L9 19zM14 6l4 4', frame: 'M4 8V4h4M16 4h4v4M20 16v4h-4M8 20H4v-4',
   undo: 'M4 9l5-5M4 9l5 5M4 9h10a6 6 0 0 1 0 12h-3', redo: 'M20 9l-5-5M20 9l-5 5M20 9H10a6 6 0 0 0 0 12h3', fit: 'M3 9V3h6M21 9V3h-6M3 15v6h6M21 15v6h-6',
-  'arrow-right': 'M4 12h16M14 6l6 6-6 6', swap: 'M4 8h15M15 4l4 4-4 4M20 16H5M9 12l-4 4 4 4',
+  'arrow-right': 'M4 12h16M14 6l6 6-6 6', 'draw-line': 'M5 19L19 5', 'draw-arrow': 'M5 19L19 5M10 5h9v9', swap: 'M4 8h15M15 4l4 4-4 4M20 16H5M9 12l-4 4 4 4',
   keyboard: 'M3 6h18v12H3zM7 10h.01M11 10h.01M15 10h.01M7 14h10',
   // Outline icons for the Shapes palette.
   'shape-rect': 'M4 6h16v12H4z', 'shape-rounded': 'M8 6h8a4 4 0 0 1 4 4v4a4 4 0 0 1-4 4H8a4 4 0 0 1-4-4v-4a4 4 0 0 1 4-4z',

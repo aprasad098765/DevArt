@@ -122,7 +122,8 @@ try {
     await part(a, 'Service').click();
     await a.getByLabel('Component name', { exact: true }).fill('Payments API');
     await a.getByLabel('Component description').fill('Takes card payments');
-    await a.getByLabel('Component colour').selectOption('green');
+    await a.getByRole('button', { name: 'Component colour' }).click();
+    await a.getByRole('option', { name: 'Green' }).click();
     await until(a, (e) => /label: "Payments API"/.test(e.code) && /description: "Takes card payments"/.test(e.code) && /color: green/.test(e.code), 'form edits');
     assert.match(await a.locator('.canvas').innerHTML(), /Takes card payments/);
     await part(a, 'Database').dblclick();

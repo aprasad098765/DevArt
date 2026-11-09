@@ -1,6 +1,6 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import * as Y from 'yjs';
-import { diagramSize, opacityOf, renderDiagram } from '../../../shared/render.ts';
+import { color, diagramSize, opacityOf, renderDiagram } from '../../../shared/render.ts';
 import { parseDiagram, type GraphNode, type ParsedDiagram } from '../../../shared/dsl.ts';
 import { toMermaid } from '../../../shared/mermaid.ts';
 import { addEdge, DRAGGABLE_TYPES, moveNode, relayout, removeEdge, removeNode, reverseEdge, setNodeProps, updateEdge, VISUAL_TYPES, type PropValue } from '../../../shared/dslEdit.ts';
@@ -9,7 +9,7 @@ import { BORDER_STYLES, BORDER_WIDTHS, NODE_SHAPES, NODE_STYLE_PROPS, TEXT_ALIGN
 import type { CanvasElement, DiagramSelection, DiagramType } from '../../../shared/types.ts';
 import { toast } from '../api.ts';
 import { CodeBox, Icon } from './ui.tsx';
-import { ColorField, Field, NumberField, OpacitySlider, Section, Segmented, Toggle, undoStep, type SegOption } from './controls.tsx';
+import { ColorSelect, Dropdown, Field, IconSelect, NumberField, OpacitySlider, Section, Segmented, Toggle, undoBoundary, undoStep, type SegOption } from './controls.tsx';
 
 const COLORS = ['blue', 'green', 'red', 'orange', 'purple', 'yellow', 'pink', 'teal', 'gray'];
 
@@ -172,6 +172,16 @@ function NodeForm({ doc, el, type, code, d, node, edit, onSelection }: NodeFormP
   const set = (patch: Record<string, PropValue>) => edit(setNodeProps(type, code, node.id, patch));
   /** A style change, saved as one undo step of its own. */
   const style = (patch: Record<string, PropValue>) => undoStep(doc, () => set(patch));
+  /**
+   * A change that shows while a slider or colour picker is still being dragged. The whole drag is one undo step:
+   * a boundary opens it on the first change, and `endLive` closes it when the control is released.
+   */
+  const dragging = useRef(false);
+  const live = (patch: Record<string, PropValue>) => {
+    if (!dragging.current) { dragging.current = true; undoBoundary(doc); }
+    set(patch);
+  };
+  const endLive = () => { dragging.current = false; undoBoundary(doc); };
   const styled = NODE_STYLE_PROPS.some((k) => p[k] !== undefined);
   const groups = d.nodes.filter((n) => n.isGroup);
   const sizable = !node.isGroup && DRAGGABLE_TYPES.includes(type);
@@ -180,103 +190,97 @@ function NodeForm({ doc, el, type, code, d, node, edit, onSelection }: NodeFormP
   return (
     <div className="visual-form pform">
       <Section title="Content">
-        <label>Name<input aria-label="Component name" value={p.label ?? node.id} onChange={(e) => set({ label: e.target.value === node.id ? undefined : e.target.value })} /></label>
-        {!node.isGroup && <label>Description<textarea rows={2} aria-label="Component description" value={p.description ?? ''} onChange={(e) => set({ description: e.target.value || undefined })} /></label>}
-        <div className="row2">
-          <label>Icon
-            <select aria-label="Component icon" value={p.icon ?? ''} onChange={(e) => style({ icon: e.target.value || undefined })}>
-              <option value="">None</option>
-              {p.icon && !ICON_NAMES.includes(p.icon) && <option value={p.icon}>{p.icon}</option>}
-              {ICON_NAMES.map((i) => <option key={i} value={i}>{i}</option>)}
-            </select>
-          </label>
-          <label>Colour
-            <select aria-label="Component colour" value={p.color ?? ''} onChange={(e) => style({ color: e.target.value || undefined })}>
-              <option value="">Default</option>
-              {p.color && !COLORS.includes(p.color) && <option value={p.color}>{p.color}</option>}
-              {COLORS.map((c) => <option key={c} value={c}>{c}</option>)}
-            </select>
-          </label>
-        </div>
+        <Field label="Name"><input aria-label="Component name" value={p.label ?? node.id} onChange={(e) => set({ label: e.target.value === node.id ? undefined : e.target.value })} /></Field>
+        {!node.isGroup && <Field label="About"><textarea rows={2} aria-label="Component description" placeholder="Description" value={p.description ?? ''} onChange={(e) => set({ description: e.target.value || undefined })} /></Field>}
+        <Field label="Icon">
+          <Dropdown ariaLabel="Component icon" searchable value={p.icon ?? ''} onChange={(v) => style({ icon: v || undefined })}
+            options={[{ value: '', label: 'None' }, ...(p.icon && !ICON_NAMES.includes(p.icon) ? [{ value: p.icon, label: p.icon }] : []), ...ICON_NAMES.map((i) => ({ value: i, label: i, icon: i }))]} />
+        </Field>
+        <Field label="Colour">
+          <Dropdown ariaLabel="Component colour" value={p.color ?? ''} onChange={(v) => style({ color: v || undefined })}
+            options={[{ value: '', label: 'Default' }, ...(p.color && !COLORS.includes(p.color) ? [{ value: p.color, label: p.color, swatch: color(p.color) }] : []), ...COLORS.map((c) => ({ value: c, label: cap(c), swatch: color(c) }))]} />
+        </Field>
       </Section>
 
       <Section title="Style" actions={
         <button type="button" className="psec-action" disabled={!styled} title="Remove every style setting from this component" onClick={() => style(Object.fromEntries(NODE_STYLE_PROPS.map((k) => [k, undefined])))}>
-          <Icon name="reset" size={12} /> Reset style
+          <Icon name="reset" size={12} /> Reset
         </button>
       }>
         {!node.isGroup && (
           <Field label="Shape">
-            <div className="shape-grid" role="radiogroup" aria-label="Shape">
-              {SHAPE_CHOICES.map((s) => {
-                const on = p.shape === s || (s === 'oval' && p.shape === 'ellipse');
-                return (
-                  <button key={s} type="button" role="radio" aria-checked={on} className={on ? 'on' : ''} title={on ? `${cap(s)} (click again for the default)` : cap(s)} aria-label={cap(s)}
-                    onClick={() => style({ shape: on ? undefined : s })}>
-                    <Icon name={`shape-${s}`} size={18} />
-                  </button>
-                );
-              })}
-            </div>
+            <IconSelect ariaLabel="Shape" icon={`shape-${p.shape === 'ellipse' ? 'oval' : p.shape ?? 'rect'}`} label={cap(p.shape === 'ellipse' ? 'oval' : p.shape ?? 'default')}>
+              {(close) => (
+                <div className="shape-grid" role="radiogroup" aria-label="Shape">
+                  {SHAPE_CHOICES.map((s) => {
+                    const on = p.shape === s || (s === 'oval' && p.shape === 'ellipse');
+                    return (
+                      <button key={s} type="button" role="radio" aria-checked={on} className={on ? 'on' : ''} title={on ? `${cap(s)} (click again for the default)` : cap(s)} aria-label={cap(s)}
+                        onClick={() => { style({ shape: on ? undefined : s }); close(); }}>
+                        <Icon name={`shape-${s}`} size={18} />
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </IconSelect>
           </Field>
         )}
-        <Field label="Fill"><ColorField ariaLabel="Fill colour" allowNone value={p.fill} onChange={(v) => style({ fill: v })} /></Field>
-        <Field label="Opacity"><OpacitySlider value={opacityOf(p.opacity)} onChange={(v) => style({ opacity: v })} /></Field>
-        <Field label={borderPx === undefined ? 'Border' : `Border (${borderPx}px)`}>
-          <Segmented ariaLabel="Border width" options={BORDER_OPTIONS} value={borderPreset(p.border)} clearable onChange={(v) => style({ border: v })} />
+        <Field label="Fill"><ColorSelect ariaLabel="Fill colour" allowNone value={p.fill} onChange={(v) => style({ fill: v })} onLive={(v) => live({ fill: v })} onEnd={endLive} /></Field>
+        <Field label="Opacity"><OpacitySlider value={opacityOf(p.opacity)} onChange={(v) => style({ opacity: v })} onLive={(v) => live({ opacity: v })} onEnd={endLive} /></Field>
+        <Field label="Border">
+          <div className="prow">
+            <Dropdown ariaLabel="Border width" value={borderPreset(p.border) ?? ''} onChange={(v) => style({ border: v || undefined })}
+              options={[{ value: '', label: borderPx === undefined ? 'Default' : `${borderPx}px` }, ...BORDER_OPTIONS.map((o) => ({ value: o.value, label: o.label }))]} />
+            <Dropdown ariaLabel="Border style" value={(BORDER_STYLES as readonly string[]).includes(p.borderStyle ?? '') ? p.borderStyle! : 'solid'} onChange={(v) => style({ borderStyle: v === 'solid' ? undefined : v })}
+              options={BORDER_STYLE_OPTIONS.map((o) => ({ value: o.value, label: o.label }))} />
+          </div>
         </Field>
-        <Field label="Border style">
-          <Segmented ariaLabel="Border style" options={BORDER_STYLE_OPTIONS} value={(BORDER_STYLES as readonly string[]).includes(p.borderStyle ?? '') ? p.borderStyle as (typeof BORDER_STYLES)[number] : 'solid'}
-            onChange={(v) => style({ borderStyle: v === 'solid' ? undefined : v })} />
-        </Field>
-        <Field label="Border colour"><ColorField ariaLabel="Border colour" value={p.borderColor} onChange={(v) => style({ borderColor: v })} /></Field>
-        <Field label="Corner radius"><NumberField ariaLabel="Corner radius" min={0} max={320} placeholder={0} value={num(p.radius)} onChange={(v) => style({ radius: v })} /></Field>
+        <Field label="Outline"><ColorSelect ariaLabel="Border colour" value={p.borderColor} onChange={(v) => style({ borderColor: v })} onLive={(v) => live({ borderColor: v })} onEnd={endLive} /></Field>
+        <Field label="Radius"><NumberField ariaLabel="Corner radius" min={0} max={320} placeholder={0} value={num(p.radius)} onChange={(v) => style({ radius: v })} /></Field>
       </Section>
 
       <Section title="Text">
-        <Field label="Text colour"><ColorField ariaLabel="Text colour" value={p.textColor} onChange={(v) => style({ textColor: v })} /></Field>
-        <div className="pfield-row">
-          <Field label="Size"><NumberField ariaLabel="Font size" min={6} max={72} placeholder={node.isGroup ? 12 : 13} value={num(p.fontSize)} onChange={(v) => style({ fontSize: v })} /></Field>
-          <Field label="Style">
+        <Field label="Colour"><ColorSelect ariaLabel="Text colour" value={p.textColor} onChange={(v) => style({ textColor: v })} onLive={(v) => live({ textColor: v })} onEnd={endLive} /></Field>
+        <Field label="Size">
+          <div className="prow">
+            <NumberField ariaLabel="Font size" min={6} max={72} placeholder={node.isGroup ? 12 : 13} value={num(p.fontSize)} onChange={(v) => style({ fontSize: v })} />
             <div className="ptoggles">
               <Toggle label="Bold" icon="bold" on={truthy(p.bold)} onChange={(on) => style({ bold: on })} />
               <Toggle label="Italic" icon="italic" on={truthy(p.italic)} onChange={(on) => style({ italic: on })} />
             </div>
-          </Field>
-        </div>
+          </div>
+        </Field>
         {!node.isGroup && (
-          <div className="pfield-row">
-            <Field label="Horizontal">
+          <Field label="Align">
+            <div className="prow">
               <Segmented ariaLabel="Horizontal text alignment" iconOnly options={ALIGN_OPTIONS} value={(TEXT_ALIGNS as readonly string[]).includes(p.align ?? '') ? p.align as (typeof TEXT_ALIGNS)[number] : 'center'}
                 onChange={(v) => style({ align: v === 'center' ? undefined : v })} />
-            </Field>
-            <Field label="Vertical">
               <Segmented ariaLabel="Vertical text alignment" iconOnly options={VALIGN_OPTIONS} value={(TEXT_VALIGNS as readonly string[]).includes(p.valign ?? '') ? p.valign as (typeof TEXT_VALIGNS)[number] : 'middle'}
                 onChange={(v) => style({ valign: v === 'middle' ? undefined : v })} />
-            </Field>
-          </div>
+            </div>
+          </Field>
         )}
       </Section>
 
       {(sizable || (!node.isGroup && groups.length > 0)) && (
-        <Section title="Layout">
+        <Section title="Layout" defaultOpen={false}>
           {!node.isGroup && groups.length > 0 && (
-            <label>Group
-              <select aria-label="Component group" value={node.parent ?? ''} onChange={(e) => {
-                const next = moveNode(type, code, node.id, e.target.value || undefined);
+            <Field label="Group">
+              <Dropdown ariaLabel="Component group" value={node.parent ?? ''} options={[{ value: '', label: 'None' }, ...groups.map((g) => ({ value: g.id, label: g.props.label ?? g.id, icon: g.props.icon }))]} onChange={(v) => {
+                const next = moveNode(type, code, node.id, v || undefined);
                 if (next === null) toast("Couldn't move this component to that group.", true);
                 else undoStep(doc, () => edit(next));
-              }}>
-                <option value="">None</option>
-                {groups.map((g) => <option key={g.id} value={g.id}>{g.props.label ?? g.id}</option>)}
-              </select>
-            </label>
+              }} />
+            </Field>
           )}
           {sizable && (
-            <div className="pfield-row">
-              <Field label="Width"><NumberField ariaLabel="Width" stepper={false} min={48} max={640} step={4} placeholder={undefined} value={num(p.w)} onChange={(v) => style({ w: v })} /></Field>
-              <Field label="Height"><NumberField ariaLabel="Height" stepper={false} min={48} max={640} step={4} placeholder={undefined} value={num(p.h)} onChange={(v) => style({ h: v })} /></Field>
-            </div>
+            <Field label="Size">
+              <div className="prow">
+                <NumberField ariaLabel="Width" stepper={false} min={48} max={640} step={4} placeholder={undefined} value={num(p.w)} onChange={(v) => style({ w: v })} />
+                <NumberField ariaLabel="Height" stepper={false} min={48} max={640} step={4} placeholder={undefined} value={num(p.h)} onChange={(v) => style({ h: v })} />
+              </div>
+            </Field>
           )}
           {sizable && (p.w !== undefined || p.h !== undefined) && (
             <button type="button" className="psec-action" onClick={() => style({ w: undefined, h: undefined })}><Icon name="fit" size={12} /> Automatic size</button>
@@ -284,13 +288,11 @@ function NodeForm({ doc, el, type, code, d, node, edit, onSelection }: NodeFormP
         </Section>
       )}
 
-      <Section title="Connections">
-        <label>Connect to
-          <select aria-label="Connect to" value="" onChange={(e) => { const to = e.target.value; if (to) undoStep(doc, () => edit(addEdge(code, node.id, to))); }}>
-            <option value="">Choose…</option>
-            {d.nodes.filter((n) => n.id !== node.id).map((n) => <option key={n.id} value={n.id}>{n.props.label ?? n.id}</option>)}
-          </select>
-        </label>
+      <Section title="Connections" defaultOpen={false}>
+        <Field label="Connect">
+          <Dropdown ariaLabel="Connect to" searchable value="" placeholder="Choose…" options={d.nodes.filter((n) => n.id !== node.id).map((n) => ({ value: n.id, label: n.props.label ?? n.id, icon: n.props.icon }))}
+            onChange={(to) => { if (to) undoStep(doc, () => edit(addEdge(code, node.id, to))); }} />
+        </Field>
         <button className="danger" onClick={() => {
           undoStep(doc, () => {
             const next = relayout(el, removeNode(type, code, node.id));
